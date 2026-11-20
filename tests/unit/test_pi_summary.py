@@ -25,6 +25,19 @@ class SummaryTests(unittest.TestCase):
             self.make_fixture(root)
             self.assertEqual(summarize_run(root, {"profile": "single"})["runtime_generation_status"], "completed")
 
+    def test_pi_diagnostics_and_specification_delivery_survive_python_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_fixture(root)
+            path = root / "summary.json"
+            summary = json.loads(path.read_text())
+            summary["response_diagnostics"] = {"usage_is_lower_bound": True, "actors": {"lead": {"unknown_usage_responses": 1}}}
+            summary["task_specification"] = {"sha256": "task-hash", "bytes": 120000, "actors": ["lead"]}
+            path.write_text(json.dumps(summary))
+            result = summarize_run(root, {"profile": "single"})
+            self.assertEqual(result["response_diagnostics"], summary["response_diagnostics"])
+            self.assertEqual(result["task_specification"], summary["task_specification"])
+
     def test_duplicate_and_truncated_traces_fail(self):
         for damage in ("duplicate", "truncate", "schema", "native"):
             with self.subTest(damage=damage), tempfile.TemporaryDirectory() as tmp:
@@ -69,6 +82,64 @@ class SummaryTests(unittest.TestCase):
             path.write_text(json.dumps(summary))
             trace.write_text(trace.read_text() + json.dumps(dict(event, event_id="review-started", type="agent_start")) + "\n")
             self.assertIn("trace_errors", summarize_run(root, options))
+
+    def make_team_fixture(self, root, count, peer=False, missing_edge=None, undelivered=False, unfinished=False):
+        self.make_fixture(root)
+        summary_path = root / "summary.json"
+        summary = json.loads(summary_path.read_text())
+        summary["team"] = {"status": "completed", "errors": []}
+        frames = []
+
+        def emit(actor, kind, data):
+            frames.append(dict(schema_version=1, run_id="r", event_id=f"team-{len(frames)}",
+                               actor_id=actor, type=kind, data=data))
+
+        members = [f"worker-{i}" for i in range(count)]
+        for member in members:
+            directory = root / "members" / member
+            directory.mkdir(parents=True)
+            native = directory / "session.jsonl"
+            native.write_text('{"type":"session","version":3}\n')
+            created = dict(schema_version=1, run_id="r", event_id=f"actor-{member}",
+                           actor_id=member, type="actor_created", data={})
+            (directory / "events.jsonl").write_text(json.dumps(created) + "\n")
+            summary["actors"].append({"id": member, "session_file": str(native)})
+            emit("lead", "member_created", {"id": member})
+            emit(member, "member_finished", {"id": member})
+            emit(member, "task_updated", {"id": f"task-{member}", "status": "pending" if unfinished else "completed"})
+        edges = [(a, b) for member in members for a, b in (("lead", member), (member, "lead"))]
+        if peer and count > 1:
+            edges.append((members[0], members[1]))
+        for index, (sender, target) in enumerate(edges):
+            if (sender, target) == missing_edge:
+                continue
+            message_id = f"message-{index}"
+            emit(sender, "message_queued", {"id": message_id, "sender": sender, "target": target})
+            if not (undelivered and index == 0):
+                emit(target, "message_delivered", {"message_id": message_id})
+        (root / "team-events.jsonl").write_text("".join(json.dumps(frame) + "\n" for frame in frames))
+        summary_path.write_text(json.dumps(summary))
+
+    def test_two_agent_trace_requires_lead_exchange_and_completion_but_no_peer(self):
+        for damage in (None, "missing_report_message", "undelivered", "unfinished"):
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.make_team_fixture(root, 1,
+                    missing_edge=("worker-0", "lead") if damage == "missing_report_message" else None,
+                    undelivered=damage == "undelivered", unfinished=damage == "unfinished")
+                result = summarize_run(root, {"profile": "team", "teammates": 1})
+                self.assertEqual(result["team"]["status"], "completed" if damage is None else "incomplete")
+                self.assertNotIn("No delivered peer message", result["team"]["errors"])
+
+    def test_larger_team_still_requires_peer_messages_and_exact_member_count(self):
+        for count, expected, peer, completed in ((4, 4, True, True), (4, 4, False, False), (1, 4, False, False)):
+            with self.subTest(count=count, expected=expected, peer=peer), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.make_team_fixture(root, count, peer=peer)
+                result = summarize_run(root, {"profile": "team", "teammates": expected})
+                self.assertEqual(result["team"]["status"], "completed" if completed else "incomplete")
+                if not peer:
+                    self.assertIn("No delivered peer message", result["team"]["errors"])
 
     def test_missing_runtime_summary_is_an_explicit_error(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,5 +1,7 @@
 # Completed one-repository Pi validation
 
+> Historical record: this page preserves an earlier run/configuration. See the [20 November 2026 validation snapshot](benchmarks/2026-11-20/README.md) for current test coverage and repeated comparisons.
+
 The requested one complete NL2Repo task has now run end to end. Success was normal agent/team completion and evaluator execution, independent of test score. No further attempt was made to improve the score.
 
 Task: **jsonlines**. Model: **Qwen/Qwen3.5-397B-A17B-FP8**. Run ID: `jsonlines-qwen-qwen3-5-397b-a17b-fp8-380ec3dd91724286b8d94dc8d513bda6`. Exactly one fresh repository job ran with one lead and two persistent teammates.

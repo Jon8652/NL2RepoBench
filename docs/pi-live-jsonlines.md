@@ -1,5 +1,7 @@
 # First live jsonlines test
 
+> Historical record: this page preserves an earlier run/configuration. See the [20 November 2026 validation snapshot](benchmarks/2026-11-20/README.md) for current test coverage and repeated comparisons.
+
 Run on 14 November 2026 using Qwen/Qwen3.5-397B-A17B-FP8 through the configured OpenAI-compatible endpoint.
 
 ## Configuration and authentication

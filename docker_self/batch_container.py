@@ -37,7 +37,10 @@ def run_batch_container(create_args, name, directory, timeout_seconds, env=None)
                     docker_command(["stop", "--time", "10", container_id], stdout=lifecycle, stderr=lifecycle, timeout=25)
             state = json.loads(docker_command(["inspect", container_id], stdout=subprocess.PIPE,
                                              stderr=lifecycle, timeout=30).stdout)[0]["State"]
-            result.update(exit_code=state.get("ExitCode"), oom_killed=bool(state.get("OOMKilled")))
+            # Preserve raw lifecycle evidence for backend-specific interpretation.
+            # Keep this helper's existing conservative completion policy unchanged.
+            result.update(exit_code=state.get("ExitCode"), oom_killed=bool(state.get("OOMKilled")),
+                          container_state=state)
             if result["generation_status"] != "timeout":
                 completed = (state["Status"] == "exited" and state["ExitCode"] == 0
                              and not state.get("OOMKilled") and not state.get("Error")

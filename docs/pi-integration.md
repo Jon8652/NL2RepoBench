@@ -8,9 +8,10 @@ The backend also supports a single-agent baseline and explicitly configured Pi e
 
 Use Docker Desktop's WSL 2 engine with Ubuntu integration enabled. Keep the checkout under the Linux filesystem, such as `/home/jon86/projects`, and run the following from the `NL2RepoBench` repository. Docker must work without `sudo`.
 
-This development checkout already has a Python 3.12 virtual environment at `.venv`. For a fresh checkout, create a Python 3.12 environment first, then install `requirements.txt`.
+For a fresh checkout, create a Python 3.12 environment and install the Python requirements. The tested host is Linux amd64/Ubuntu WSL 2; the current generation image installs an x86-64 fd binary. Other CPU architectures have not been validated.
 
 ```bash
+python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 python scripts/build_pi.py
@@ -29,7 +30,7 @@ python scripts/test_pi.py
 python scripts/smoke_pi.py --evaluate-fixture
 ```
 
-The first command runs Python contracts, TypeScript checking, and real Pi SDK sessions against a scripted OpenAI-compatible SSE server. The second command exercises the complete Python-to-Docker path in four configurations: single agent, an external extension with flags and a startup mode command, a lead plus two teammates, and an explicitly uncapped team. It submits generated code to the existing evaluator using a tiny fixture image with one known test.
+The first command runs Python contracts, TypeScript checking, and real Pi SDK sessions against a scripted OpenAI-compatible SSE server. The second command exercises the complete Python-to-Docker path in eight configurations: all total agent counts 1-6, an external extension with flags and a startup mode command, and an explicitly uncapped default three-agent team. Larger teams include independent components and a dependent review join. It submits generated code to the existing evaluator using a tiny fixture image with one known test.
 
 These are integration checks, not model-quality benchmark scores. Mock usage values are synthetic and incur no model charges. Generation containers in mock mode use Docker's `--network none`; the only model endpoint is a loopback server started inside that container. A supplied external endpoint or real key is ignored in mock mode.
 
@@ -38,6 +39,8 @@ To run the fixture profiles individually without evaluation:
 ```bash
 python main.py --config config.pi.mock.single.json --task-root tests/fixtures
 python main.py --config config.pi.mock.team.json --task-root tests/fixtures
+python main.py --config config.pi.mock.two-agent.json --task-root tests/fixtures
+python main.py --config config.pi.mock.large-team.json --task-root tests/fixtures
 ```
 
 No real-model tests should be run until an endpoint and credentials are supplied. The real-model example intentionally has a placeholder model and empty endpoint.
@@ -58,9 +61,10 @@ Each `startPro` entry selects a model and task names. The `proNameList` values r
 |---|---|---|
 | `profile` | `team` | `single` or `team`. Single mode starts only the lead. |
 | `mock` | `false` | Explicitly select the in-container scripted model. |
-| `teammates` | `2` | Number of teammates, excluding the lead. Team mode requires at least two for peer messaging. |
+| `teammates` | `2` | Number of teammates, excluding the lead; minimum one. Inferred from explicit roles when omitted, otherwise two. |
 | `max_active_teammates` | `2` | Concurrent member runs; independent of total team size. |
-| `roles` | implementer, reviewer | Role name, `prompt_file`, optional built-in `tools`, and optional `start_after` role names. |
+| `roles` | implementer, reviewer | Role name, exactly one of `prompt` or `prompt_file`, optional built-in `tools`, and optional `start_after` role names. |
+| `lead_prompt` / `lead_prompt_file` | unset | Additional lead instructions, inline or from a UTF-8 file; choose one source. Also available in single mode. |
 | `task_timeout_seconds` | `900` | Task deadline; Docker also enforces an outer deadline. |
 | `max_total_tokens` | `50000` | Shared, provider-reported token budget across all actors; explicit null disables token stopping while retaining accounting. |
 | `max_turns` | `60` | Shared assistant-response budget across all actors. |
@@ -76,11 +80,15 @@ Each `startPro` entry selects a model and task names. The `proNameList` values r
 
 `max_pool_size` limits concurrent benchmark jobs. It is separate from teammate concurrency. Start with one benchmark job at a time.
 
-The default reviewer has `start_after: ["implementer"]`. Its persistent session is created immediately, but its first model request is deferred until all spawned implementers report completion and settle. Queued lead follow-ups and implementation handoffs are included in the initial review context. Reviewers never poll an empty workspace. Pi writes native session files only after the first turn; a failed run can therefore record a created but deferred actor with no native file. The verifier identifies these as `deferred_actors`, keeps the run failed/incomplete, and still requires native files for started actors and successful runs. Custom roles may specify their own `start_after` lists (validated as an acyclic graph), or an empty list for independent work. An implementation worker must hand off and finish without waiting for the delayed reviewer to reply; later peer findings can reopen that persistent worker. Failed prerequisites fail dependent workers without model requests.
+The default reviewer has `start_after: ["implementer"]`. Its persistent session is created immediately, but its first model request is deferred until all spawned implementers report completion and settle. Queued lead follow-ups and implementation handoffs are included in the initial review context. Reviewers never poll an empty workspace. Each new session receives the complete task specification before its first model request, so even a deferred actor can have a native file containing that context. Older failed runs may have created deferred actors without native files; the verifier still accepts these as `deferred_actors`, keeps the run failed/incomplete, and requires native files for started actors and successful runs. Custom roles may specify their own `start_after` lists (validated as an acyclic graph), or an empty list for independent work. An implementation worker must hand off and finish without waiting for the delayed reviewer to reply; later peer findings can reopen that persistent worker. Failed prerequisites fail dependent workers without model requests.
 
 `wait_agent` accepts a member name or `all`. It blocks until the selected queued/running work settles, bounded by the shared task deadline and cancellation. Legacy `timeout_ms` remains accepted but does not force short status returns. The lead should delegate in a batch, then wait once for `all`. Waiting and scheduler checks consume no model tokens.
 
-Role prompts resolve relative to the configuration file. More than two teammates require enough explicit role definitions. The tested configurations are two teammates with one or two concurrently active members. The SDK does not impose the upstream example's four-worker limit on this extension.
+Runtime timing uses one monotonic elapsed-time budget for the main timer, blocking waits, and final draining. Wall-clock changes and host/VM suspension cannot independently expire team waits while the runtime still has elapsed time available. Actual expiry fails the shared budget and aborts sessions; it is not returned as a retryable status-polling error. Docker retains its outer execution deadline. If that deadline stops the container and Pi observes a termination signal, the result preserves generation_status=timeout and stop_reason=runtime_limit, alongside the child runtime_generation_status.
+
+The runtime caches the full public start.md once before actor creation, then appends it to each actor's native context with triggerTurn=false. This includes sections beyond Pi's native read-tool limit and consumes no extra model turn. Subsequent workspace edits cannot change the snapshot supplied to later teammates. task_specification metadata and task_specification_delivered events record its hash, byte count and recipients; the manifest records the delivery policy. This changes task delivery for future runs while preserving existing role files and default lead instructions. Context-window limits and native compaction still apply.
+
+Prompt files resolve relative to the configuration file and must contain nonempty UTF-8 text. More than two teammates require enough explicit role definitions. Team size and concurrent activity are separate settings; there is no fixed four-worker limit in this extension. Mock SDK coverage includes one, two, three and five teammates, with the lead counted separately.
 
 The lead can call `start_team` with all assignments in one action. It creates owned task-board entries, persistent sessions and actual delegation messages. `spawn_teammate` remains available for custom orchestration. A member calls `finish_teammate` to explicitly declare completion, update owned task-board entries, and send its report to the lead and dependent reviewers together. `status: "incomplete"` keeps work incomplete. Dependent workers receive handoffs before their first request. Delivery receipts still require the actual native recipient event; queueing is not counted as delivery. `send_message`, `team_task`, `list_agents` and `wait_agent` remain available for follow-ups. Members do not receive spawn tools. Task write scopes are coordination metadata, not filesystem enforcement.
 
@@ -89,6 +97,47 @@ Messages have separate queued and delivered events. A delivery receipt is record
 The built-in file extension provides `write_files` with `files: [{path, content}, ...]`. It writes up to 64 UTF-8 files via Pi's write tool and returns path/byte/hash receipts without echoing source. All paths are checked before the first write; duplicate paths, workspace escapes and symlink traversal are rejected. Runtime I/O failure or cancellation can leave an explicitly reported partial batch. The `write` entry in role tool lists maps to `write_files`; roles without write permission do not gain it. Single-agent mode also supports this tool. Existing custom modes can still manage their own active tools.
 
 When `compact_write_history: true`, the `context` hook summarizes successful large historical `write`/`write_files` call/result pairs as ordinary text receipts in provider context. It removes both sides of each summarized pair, preserving the protocol and avoiding placeholder examples in tool arguments. Full calls and source remain on disk and in native session/normalized traces. Failed, unresolved, unrelated and small calls retain their original IDs/results. The batch writer rejects history omission markers submitted as new file content. This format was corrected after a live model copied the earlier argument markers into new files. Use `read` to retrieve current source when needed. This reduces request size, not accounting: provider-reported input/output token usage is still counted unchanged. `pi.batch_file_writes: false` restores the original write tool. `compact_write_history` defaults to false, so normal runs use Pi's native history and built-in compaction. The summary hook is explicitly experimental and independent of token accounting. Manifests record the effective setting, and `write_history_compacted` events record removed character counts. Mock payload observations verify actual request reduction; synthetic mock tokens do not estimate billing.
+
+## Team sizes and custom prompts
+
+The unchanged default three-agent workflow uses `implementer` and `reviewer`, with the reviewer starting after implementation. Its lead instructions remain byte-for-byte identical. Single mode also retains its original default instruction.
+
+For **two total agents**, add `"teammates": 1` to the team settings. The default sole teammate gets an implementation prompt that hands review to the lead, rather than expecting another reviewer. The lead receives role-aware instructions and owns work it did not delegate. A custom sole teammate could instead review code written by the lead; specify its role and the lead responsibilities explicitly.
+
+Larger or custom topologies receive instructions generated from their configured roles, prompts, tools and dependency graph. For example, the following `pi` fields create **four total agents**:
+
+```json
+{
+  "profile": "team",
+  "teammates": 3,
+  "max_active_teammates": 2,
+  "lead_prompt": "Define shared interfaces and assign disjoint files. Collect the final review before finishing.",
+  "roles": [
+    {
+      "name": "core",
+      "prompt": "Implement only the assigned core files. Check them once and submit finish_teammate with changed paths and known failures."
+    },
+    {
+      "name": "api",
+      "prompt": "Implement only the assigned API and packaging files. Coordinate interfaces, check once and submit finish_teammate."
+    },
+    {
+      "name": "checker",
+      "prompt": "Review both components after handoff, run one integration check, and report findings through finish_teammate.",
+      "tools": ["read", "bash"],
+      "start_after": ["core", "api"]
+    }
+  ]
+}
+```
+
+The two implementers may run concurrently; `checker` starts after both have reported and settled. Both handoffs enter its initial context automatically. `teammates` may be omitted when supplying roles; it defaults to their count. If explicitly provided, it remains the maximum/required member count and needs at least that many role definitions. With a larger role catalogue, the lead must select assignments that include every prerequisite of the selected roles.
+
+Role definitions may use `"prompt_file": "./prompts/core.md"` instead of `prompt`. The lead may use `"lead_prompt_file": "./prompts/lead.md"` instead of `lead_prompt`. Each accepts exactly one source, resolved relative to the configuration file. Resolved lead and role instructions are stored in runtime configuration/artifacts; role and effective system-prompt hashes identify the instructions used. Custom instructions add responsibilities without removing the built-in delegation, delivery, completion and budget requirements. Customizing the lead selects the role-aware team instructions even with the default role names.
+
+All teams must deliver instructions and reports in both directions between the lead and every member, complete owned tasks and finish their sessions. A teammate-to-teammate message is additionally required only when **two or more teammates** exist. Dependency handoffs count; independent teams can use `send_message` directly. Two-agent mode does not invent a peer to satisfy that check. Both the TypeScript runtime and independent Python trace reader enforce the same rule.
+
+Use `config.pi.mock.two-agent.json` and `config.pi.mock.large-team.json` for mock-only generation examples. The smoke script evaluates both through the existing fixture evaluator. No live tasks are part of these checks. Larger teams share the same configured token, turn, time and message allowances; these are not automatically multiplied by agent count.
 
 ## Custom extensions
 
@@ -146,7 +195,16 @@ Results distinguish `generation_status`, `runtime_generation_status`, `extension
 
 With workflow validation `off`, team status is `not_checked`; trace integrity is still checked. Single-agent runs report `not_applicable`.
 
-The trace reader checks schema versions, duplicate IDs, LF framing, native-session presence, team creation, delivered lead/member and peer messages, completed tasks, and final reports. It retains raw events for inspecting collaboration quality. Usage is counted from finalized messages once per actor, with auxiliary compaction usage tracked separately when exposed. Unknown prices remain null. Shared token limits are enforced at response boundaries, so in-flight concurrent responses can overshoot a limit; they are not a guaranteed billing cap.
+
+Docker's OOMKilled flag can remain set after a tool subprocess was killed even when the Pi agent later repairs the code and finishes normally. The Pi adapter accepts this as recovered only with raw Docker evidence of an exited container, zero container and attach exit codes, no Docker/cleanup errors, and an independently validated completed runtime. Every configured actor must have a settled valid session, with no extension, trace, role-budget or shared-budget errors. Team workflow must be completed, or explicitly disabled and reported as not_checked. Missing proof, main-process OOM, nonzero exits, cancellation and timeouts remain failures.
+
+A verified recovery sets recovered_subprocess_oom=true and permits the normal evaluator path. It keeps oom_killed=true, the raw container_state, container_generation_status=failed, the original container_error and a warning; the obsolete fatal top-level error is removed only for that verified case. Recovery never consults a repository test result, and a completed run can still score zero. Container memory limits and actor prompts are unchanged. The shared Docker helper only gains raw state metadata; its conservative completion decisions, OpenHands behavior and shared evaluator logic are unchanged. Historical runs and diagnostic scores are not rewritten; future manifests record the updated Python adapter fingerprint.
+
+The trace reader checks schema versions, duplicate IDs, LF framing, native-session presence, team creation, delivered lead/member messages and peer messages when multiple teammates exist, completed tasks, and final reports. It retains raw events for inspecting collaboration quality. Usage is counted from finalized messages once per actor, with auxiliary compaction usage tracked separately when exposed. Unknown prices remain null. Shared token limits are enforced at response boundaries, so in-flight concurrent responses can overshoot a limit; they are not a guaranteed billing cap.
+
+Pi results additionally retain response_diagnostics per actor: error_responses, aborted_responses, length_responses, recovered_error_responses, unknown_usage_responses, and recognized error_codes. Recovery means a later normal assistant response followed the error; it does not imply that repository tests passed. Zero-only or absent provider usage is marked unknown, including after interruption, and usage_is_lower_bound is set. Recorded token totals remain the provider-reported amounts; no missing usage or prices are invented. Aborts remain distinct from transport errors. The pinned SDK retry policy stays bounded at one session-level retry; HTTP timeouts were not increased. Raw native events retain the detailed symptoms.
+
+The existing context notice also warns at 80% of the shared response/token budget and near the elapsed deadline (the smaller of the last 20% or 60 seconds), even when tokens are uncapped. Team members are asked to submit an honest finish_teammate report; the lead collects reports, and single-agent mode receives completion guidance. These notices do not create extra turns, change role ownership, or turn unfinished work into success.
 
 Re-evaluate a saved completed generation without calling a model:
 
@@ -160,9 +218,25 @@ Re-evaluation publishes a separate result referring to `source_run_id` and uses 
 
 ## Validation scope
 
-Mock checks cover the actual Pi SDK/tool loop, headless extension loading/options/commands/hooks, packaged local dependencies, three persistent sessions, peer messaging, concurrency limits and spawn races, retries, worker errors, early lead completion, token limits, timeouts, malformed traces, Docker lifecycle handling, and evaluator copies. The Docker smoke checks use a deterministic fixture, not a claim about Qwen/DeepSeek performance on NL2Repo.
+Mock checks cover the actual Pi SDK/tool loop, headless extension loading/options/commands/hooks, packaged local dependencies, all total team sizes 1-6, peer messaging, concurrency limits and spawn races, retries, worker errors, early lead completion, token limits, timeouts, malformed traces, Docker lifecycle handling, and evaluator copies. The Docker smoke checks use a deterministic fixture, not a claim about Qwen/DeepSeek performance on NL2Repo.
 
-Live endpoint compatibility, real-model scores, larger teams, and a complete OpenHands container run remain separate validation work. OpenHands dispatch and configuration compatibility are covered by automated contracts.
+As of 20 November 2026, **45 Python contracts, 62 SDK mock tests and TypeScript checking pass** for the current source. The source-only publication check excludes local configs/run artifacts and reuses the pinned installed Node dependencies read-only.
+
+The complete offline Docker smoke suite also passed all eight profiles at 1/1, including total agent counts 1-6, external extension options/startup commands, and uncapped team accounting. This uses synthetic model responses and makes no live model requests.
+
+The clock, full-specification delivery, response diagnostics, flexible teams and verified subprocess-OOM policy were also exercised in the [current live validation](benchmarks/2026-11-20/README.md). It includes a 21-run Pi 1-6/OpenHands sweep and 36 additional generations for the five-attempt study. The reports overlap nine baselines: **57 unique live generations**, **54 scored evaluations**, and **three interrupted/unscored evaluations** in total. The default three-agent role/lead instructions stayed unchanged during these cohorts.
+
+One streamed reviewer response ended with `UND_ERR_SOCKET`. The existing recovery path completed the same run and its evaluation; missing provider usage remains flagged as unknown. Four completed single-agent `jsonlines` generations retained recovered-subprocess-OOM evidence and were graded normally. All reported totals remain recorded usage, with lower bounds where necessary.
+
+No full 104-task benchmark was run. Historical reports retain their original configurations and outcomes; use the dated current snapshot for the latest code. Source fingerprints, rather than the recorded pre-publication base revision alone, identify the tested working tree.
+
+## Shared evaluator limitations
+
+The evaluator code and task definitions remain unchanged by the Pi hardening changes. It has no per-test timeout. A generated infinite loop can prevent grading from finishing, and externally stopping pytest can leave a misleading raw zero/completed record without a final test summary.
+
+The current reports identify three proven `jsonlines` loops in generated readers, preserve their source/result hashes and reported usage, and mark those evaluations interrupted/unscored in derived comparisons. No source was repaired and no replacement generation was run. This reporting annotation is not an automatic timeout or detection feature in the normal benchmark runner.
+
+The legacy evaluator can remove generated dependency declarations, and its error parser can count one collection error more than once. These pre-existing behaviors are retained. A valid completed evaluation can legitimately score zero; distinguish it from an interrupted run without a final summary. Add bounded termination and summary validation before relying on a large unattended sweep.
 
 ## Dependency preparation and token reservations
 

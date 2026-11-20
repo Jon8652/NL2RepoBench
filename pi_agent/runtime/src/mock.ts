@@ -1,11 +1,46 @@
 /** A scripted OpenAI-compatible SSE endpoint. No external requests or real credentials. */
 import { createServer, type Server } from "node:http";
 import { once } from "node:events";
+import type { RuntimeConfig } from "./types.js";
+import { isDefaultTeam } from "./prompts.js";
 
 type Action = { tool: string; args: Record<string, unknown> } | { text: string; reason?: string };
-export type MockScenario = "normal" | "error" | "length" | "worker-error" | "early-lead" | "rate-limit-once" | "hang" | "slow-handoff" | "write-history" | "missing-report" | "known-failures";
+export type MockScenario = "normal" | "error" | "length" | "worker-error" | "early-lead" | "rate-limit-once" | "hang" | "slow-handoff" | "write-history" | "missing-report" | "known-failures" | "no-peer" | "stream-drop-once" | "stream-drop" | "partial-write-stream" | "hang-worker";
 
 const call = (tool: string, args: Record<string, unknown>): Action => ({ tool, args });
+
+function flexibleAction(actor: string, step: number, batch: boolean, config: RuntimeConfig, scenario: MockScenario): Action {
+  const roles = config.roles.slice(0, config.teammates);
+  const first = roles.find(role => !role.start_after?.length)!;
+  if (actor === "lead") {
+    const steps: Action[] = [
+      call("start_team", { members: roles.map(role => ({ name: role.name, role: role.name,
+        task: "Follow your configured role instructions, complete your assigned fixture pass and submit finish_teammate.",
+        write_scopes: role.start_after?.length ? [] : [role.name === first.name ? "answer.py" : role.name + ".fixture.md"] })) }),
+      call("wait_agent", { target: "all", timeout_ms: 1 }),
+    ];
+    if (config.teammates === 1) steps.push(call("bash", { command: "python3 -c 'from answer import answer; assert answer() == 42'" }));
+    steps.push(call("list_agents", {}));
+    return steps[step] ?? { text: "Collected all configured role reports and completed the assigned lead verification." };
+  }
+  const role = roles.find(item => item.name === actor)!;
+  const steps: Action[] = [call("read", { path: "start.md" })];
+  if (!role.start_after?.length) {
+    const file = role.name === first.name
+      ? { path: "answer.py", content: "def answer():\n    return 42\n" }
+      : { path: role.name + ".fixture.md", content: "Completed the assigned component.\n" };
+    steps.push(batch ? call("write_files", { files: [file] }) : call("write", file));
+    steps.push(call("bash", { command: "test -f " + file.path }));
+  } else {
+    steps.push(call("bash", { command: "python3 -c 'from answer import answer; assert answer() == 42'" }));
+  }
+  // With no dependency handoff, explicitly exercise peer messaging before either pass ends.
+  if (roles.length > 1 && !roles.some(item => item.start_after?.length) && actor === first.name && scenario !== "no-peer") {
+    steps.unshift(call("send_message", { target: roles.find(item => item.name !== actor)!.name, text: "Coordinate ownership: I will produce answer.py; keep your assigned component separate." }));
+  }
+  steps.push(call("finish_teammate", { report: "Completed the configured role pass; recorded the fixture checks and component handoff." }));
+  return steps[step] ?? { text: "Configured role report complete." };
+}
 
 function action(actor: string, step: number, team: boolean, probe: boolean, batch: boolean): Action {
   const writeAnswer = () => batch ? call("write_files", { files: [
@@ -42,9 +77,9 @@ function action(actor: string, step: number, team: boolean, probe: boolean, batc
   return steps[step] ?? { text: "Review report complete." };
 }
 
-export async function startMockServer(scenario: MockScenario = "normal"): Promise<{ baseUrl: string; server: Server; requests: Record<string, number>; observations: { actor: string; step: number; message_characters: number; has_large_file_marker: boolean; has_tool_argument_omission_marker: boolean; active_tools: string[] }[]; close: () => Promise<void> }> {
+export async function startMockServer(scenario: MockScenario = "normal", config?: RuntimeConfig): Promise<{ baseUrl: string; server: Server; requests: Record<string, number>; observations: { actor: string; step: number; message_characters: number; has_large_file_marker: boolean; has_tool_argument_omission_marker: boolean; active_tools: string[]; has_specification_start: boolean; has_specification_end: boolean }[]; close: () => Promise<void> }> {
   const requests: Record<string, number> = {};
-  const observations: { actor: string; step: number; message_characters: number; has_large_file_marker: boolean; has_tool_argument_omission_marker: boolean; active_tools: string[] }[] = [];
+  const observations: { actor: string; step: number; message_characters: number; has_large_file_marker: boolean; has_tool_argument_omission_marker: boolean; active_tools: string[]; has_specification_start: boolean; has_specification_end: boolean }[] = [];
   let rateLimited = false;
   const server = createServer(async (req, res) => {
     if (req.method !== "POST" || req.url !== "/v1/chat/completions") {
@@ -65,9 +100,10 @@ export async function startMockServer(scenario: MockScenario = "normal"): Promis
       }
       const messages = JSON.stringify(body.messages);
       observations.push({ actor, step, message_characters: messages.length,
-        has_large_file_marker: messages.includes("MOCK_LARGE_FILE_MARKER"), has_tool_argument_omission_marker: messages.includes("[Written file body omitted from request history;"), active_tools: [...tools] });
+        has_large_file_marker: messages.includes("MOCK_LARGE_FILE_MARKER"), has_tool_argument_omission_marker: messages.includes("[Written file body omitted from request history;"), active_tools: [...tools],
+        has_specification_start: messages.includes("SPECIFICATION_START"), has_specification_end: messages.includes("SPECIFICATION_END") });
       requests[actor] = step + 1;
-      if (scenario === "hang") return;
+      if (scenario === "hang" || (scenario === "hang-worker" && actor !== "lead" && step === 1)) return;
       if (scenario === "error" || (scenario === "worker-error" && actor !== "lead")) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: { message: "Scripted mock model failure", type: "invalid_request_error" } })); return;
@@ -83,7 +119,11 @@ export async function startMockServer(scenario: MockScenario = "normal"): Promis
         : scenario === "missing-report" && actor === "implementer" && step >= 3 ? { text: "Work was attempted without submitting a structured report." }
         : scenario === "known-failures" && actor === "implementer" && step === 1 ? call(tools.has("write_files") ? "write_files" : "write", tools.has("write_files") ? { files: [{ path: "answer.py", content: "def answer():\n    return 41\n" }] } : { path: "answer.py", content: "def answer():\n    return 41\n" })
         : scenario === "known-failures" && ((actor === "implementer" && step === 3) || (actor === "reviewer" && step === 2)) ? call("finish_teammate", { report: "Completed the assigned pass. Known failure: answer() returns 41 rather than 42; this is retained for benchmark scoring." })
-        : action(actor, step, tools.has("spawn_teammate"), tools.has("contract_probe"), tools.has("write_files"));
+        : tools.has("spawn_teammate") && config && !isDefaultTeam(config)
+          ? flexibleAction(actor, step, tools.has("write_files"), config, scenario)
+          : actor !== "lead" && config?.profile === "team" && !isDefaultTeam(config)
+            ? flexibleAction(actor, step, tools.has("write_files"), config, scenario)
+            : action(actor, step, tools.has("spawn_teammate"), tools.has("contract_probe"), tools.has("write_files"));
       if (scenario === "slow-handoff" && actor === "implementer" && step === 1) {
         await new Promise(resolve => setTimeout(resolve, 250));
       }
@@ -94,6 +134,16 @@ export async function startMockServer(scenario: MockScenario = "normal"): Promis
         choices: [{ index: 0, delta, finish_reason: reason }], ...(usage ? { usage } : {}),
       }) + "\n\n");
       chunk({ role: "assistant", content: "" });
+      if (scenario === "stream-drop" || (step === 0 && (scenario === "stream-drop-once" || scenario === "partial-write-stream"))) {
+        if (scenario === "partial-write-stream") {
+          chunk({ tool_calls: [{ index: 0, id: "interrupted-write", type: "function",
+            function: { name: "write_files", arguments: '{"files":[{"path":"corrupt.py","content":"unfinished' } }] });
+        } else chunk({ content: "Mock interrupted response" });
+        // Deliver headers and a real partial SSE response before terminating the socket.
+        res.flushHeaders();
+        setTimeout(() => res.destroy(), 10).unref();
+        return;
+      }
       if ("tool" in selected) {
         chunk({ tool_calls: [{ index: 0, id: `call-${actor}-${step}`, type: "function",
           function: { name: selected.tool, arguments: JSON.stringify(selected.args) } }] });

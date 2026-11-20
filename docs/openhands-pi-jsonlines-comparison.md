@@ -1,5 +1,7 @@
 # OpenHands versus Pi: one jsonlines task
 
+> Historical record: this page preserves an earlier run/configuration. See the [20 November 2026 validation snapshot](benchmarks/2026-11-20/README.md) for current test coverage and repeated comparisons.
+
 Both runs completed normally and both scored **17/27 (62.96%)** on the official evaluator: 17 passed, 10 failed, zero collection errors. The matching score does not mean identical implementations: 15 tests passed in both, eight failed in both, and four tests split between them.
 
 This validates normal generation and evaluation with both backends. It is one trial per setup and does not establish general performance or a causal advantage for either framework.

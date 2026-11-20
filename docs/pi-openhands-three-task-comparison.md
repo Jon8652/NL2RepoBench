@@ -1,5 +1,7 @@
 # Pi versus OpenHands: three-task comparison
 
+> Historical record: this page preserves an earlier run/configuration. See the [20 November 2026 validation snapshot](benchmarks/2026-11-20/README.md) for current test coverage and repeated comparisons.
+
 Model: **Qwen/Qwen3.5-397B-A17B-FP8**. Pi used a lead and two persistent teammates; OpenHands used one CodeAct agent. Tasks were selected before model calls from the official Easy, Medium and Hard groups.
 
 | Task | Pi score | Pi reported tokens | OpenHands score | OpenHands reported tokens |

@@ -28,6 +28,7 @@ export interface RuntimeConfig {
   enforce_role_token_limits?: boolean;
   workflow_validation: "off" | "report" | "required";
   roles: Role[];
+  lead_prompt?: string;
   extensions: { path: string; scope: "lead" | "members" | "all"; sha256?: Record<string, string> }[];
   extension_options: Record<string, boolean | string>;
   startup_commands: string[];

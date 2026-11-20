@@ -7,6 +7,7 @@ import { Budget, Trace, writeJson } from "./events.js";
 import { Coordinator } from "./extensions/team.js";
 import { startMockServer, type MockScenario } from "./mock.js";
 import { Sessions } from "./session.js";
+import { buildLeadInstructions } from "./prompts.js";
 import { prepareEnvironment } from "./setup.js";
 import { verifyRuntimeTools } from "./readiness.js";
 import type { RuntimeConfig } from "./types.js";
@@ -26,7 +27,6 @@ export async function runBenchmark(config: RuntimeConfig, scenario: MockScenario
   let generation = "failed";
   let extensionStatus = "loaded";
   let failure: string | undefined;
-  let timer: ReturnType<typeof setTimeout> | undefined;
   let manifest: Record<string, unknown> = {};
   const signalHandler = () => budget.fail("Run cancelled by termination signal");
   process.once("SIGTERM", signalHandler);
@@ -36,7 +36,7 @@ export async function runBenchmark(config: RuntimeConfig, scenario: MockScenario
     setup = await prepareEnvironment(config);
     writeJson(join(config.artifacts, "setup.json"), setup);
     if (config.mock) {
-      mock = await startMockServer(scenario);
+      mock = await startMockServer(scenario, config);
       // Ignore any supplied external endpoint whenever mock mode is selected.
       config.model = { ...config.model, id: "nl2repo-mock", api: "openai-completions", baseUrl: mock.baseUrl };
       process.env.NL2REPO_MODEL_API_KEY = "mock-not-a-secret";
@@ -51,23 +51,16 @@ export async function runBenchmark(config: RuntimeConfig, scenario: MockScenario
     if (models.getError()) throw new Error(models.getError());
     sessions = new Sessions(config, models, trace, budget);
     budget.abort = () => { void sessions?.abortAll(); };
-    timer = setTimeout(() => budget.fail("Task execution timeout"), config.task_timeout_seconds * 1000);
+    budget.startTimer();
     if (config.profile === "team") coordinator = new Coordinator(config, sessions, trace, budget);
-    const teamInstructions = coordinator ? `Use exactly ${config.teammates} persistent teammates with configured roles (${config.roles.map(r => r.name).join(", ")}). ` +
-      "Read start.md once. Call start_team with one assignment per role; it creates owned tasks and delivers delegation messages. " +
-      "Delegate source implementation and a single import check to the implementer, and behavioral verification to the reviewer. " +
-      "The reviewer starts after the implementer hands off. Members use finish_teammate once to complete their tasks and send reports automatically. " +
-      "Then call wait_agent target=all once. Do not poll. Integrate their delivered findings and give a concise final result. " +
-      "This run validates benchmark operation, not maximum score. Produce a complete initial repository attempt, perform one review pass, and finish with known failures recorded. " +
-      "Failing repository tests do not mean the agent or benchmark failed. Do not pursue repeated type-checking or repair loops until all tests pass. " +
-      "The lead collects reports and finishes without redoing implementation or checks. If required files were not attempted, report that honestly." : "Complete this task as a single agent.";
+    const teamInstructions = buildLeadInstructions(config);
     const lead = await sessions.create("lead", `${teamInstructions} Dependency setup: ${JSON.stringify(setup)}.`, coordinator ? [coordinator.extension("lead")] : [], ["read", "bash", "edit", "write"]);
     for (const command of config.startup_commands) {
       const name = command.slice(1).split(/\s/, 1)[0];
       if (!lead.session.resourceLoader.getExtensions().extensions.some(ext => ext.commands.has(name))) throw new Error(`Unknown startup extension command: ${name}`);
       await lead.session.prompt(command);
     }
-    const task = readFileSync(join(config.workspace, "start.md"), "utf8");
+    const task = sessions.specification.content;
     manifest = { schema_version: 1, run_id: config.run_id, pi_version: "1.5.2", node_version: process.version,
       package_lock_sha256: sha(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8")),
       runtime_source_sha256: process.env.NL2REPO_RUNTIME_SHA256 ?? null,
@@ -76,11 +69,14 @@ export async function runBenchmark(config: RuntimeConfig, scenario: MockScenario
       mock: config.mock, profile: config.profile, model: config.model,
       batch_file_writes: config.batch_file_writes !== false, write_history: config.compact_write_history === true ? "successful large write call/result pairs summarized as receipt text in provider context only" : "native Pi history", task_sha256: sha(task),
       roles: config.roles.map(role => ({ ...role, prompt_sha256: sha(role.prompt) })),
+      lead_prompt: config.lead_prompt ?? null,
       extensions: config.extensions, extension_options: config.extension_options, startup_commands: config.startup_commands,
       resource_policy: "explicit resources only; project trust disabled; no host configuration",
       session_replacement: "disabled to preserve benchmark actor identity",
       budgets: { total_tokens: config.max_total_tokens, turns: config.max_turns, messages: config.max_messages,
         timeout_seconds: config.task_timeout_seconds, max_active_teammates: config.max_active_teammates },
+      task_specification: { sha256: sessions.specification.sha256, bytes: sessions.specification.bytes,
+        delivery: "native_custom_message", scope: "each_actor_before_first_request" },
       lead_tools: lead.session.getActiveToolNames(), system_prompt_sha256: sha(lead.session.systemPrompt) };
     writeJson(join(config.artifacts, "manifest.json"), manifest);
     budget.check();
@@ -106,7 +102,7 @@ export async function runBenchmark(config: RuntimeConfig, scenario: MockScenario
     if (/termination signal/i.test(budget.failure ?? "")) generation = "cancelled";
     trace.emit("lead", "runtime_error", { error: failure });
   } finally {
-    if (timer) clearTimeout(timer);
+    budget.stopTimer();
     await coordinator?.stop();
     try { await sessions?.close(); } catch (error) { failure = failure ?? String(error); generation = "failed"; }
     await mock?.close();
@@ -123,6 +119,7 @@ export async function runBenchmark(config: RuntimeConfig, scenario: MockScenario
       assistant_responses: budget.totalTurns, cost: null },
     actors: [...(sessions?.actors.values() ?? [])].map(actor => ({ id: actor.id, session_id: actor.session.sessionId,
       session_file: actor.session.sessionFile, settled: actor.settled, last_stop_reason: actor.lastStopReason, errors: actor.errors })),
+    response_diagnostics: budget.responseDiagnostics, task_specification: sessions?.specificationDelivery,
     mock_requests: mock?.requests, mock_observations: mock?.observations, manifest_path: join(config.artifacts, "manifest.json") };
   writeJson(join(config.artifacts, "summary.json"), summary);
   return summary;

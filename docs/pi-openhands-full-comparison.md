@@ -1,5 +1,7 @@
 # Pi and OpenHands: full repository-run comparison
 
+> Historical record: this page preserves an earlier run/configuration. See the [20 November 2026 validation snapshot](benchmarks/2026-11-20/README.md) for current test coverage and repeated comparisons.
+
 Model: **Qwen/Qwen3.5-397B-A17B-FP8**. Pi used a lead and two teammates; OpenHands used a single CodeAct agent. The table retains every listed completed attempt, including both OpenHands python-slugify attempts. No new Pi generation was run for the repeat.
 
 | Repository / attempt | Pi score | Pi reported tokens | OpenHands score | OpenHands reported tokens |

@@ -1,0 +1,2 @@
+# Preserve original CSV export bytes and recognize their CRLF line endings.
+docs/benchmarks/2026-11-20/data/*.csv -text whitespace=cr-at-eol

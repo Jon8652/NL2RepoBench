@@ -1,0 +1,46 @@
+{
+  "backend": "pi",
+  "evaluate": false,
+  "max_pool_size": 1,
+  "pi": {
+    "profile": "team",
+    "mock": true,
+    "teammates": 3,
+    "max_active_teammates": 2,
+    "task_timeout_seconds": 60,
+    "max_total_tokens": 5000,
+    "max_turns": 60,
+    "workflow_validation": "required",
+    "roles": [
+      {
+        "name": "core",
+        "prompt": "Implement only the core files assigned by the lead. Agree public interfaces with the API teammate through send_message when needed. Run a bounded component check, then finish_teammate with changed paths and known failures."
+      },
+      {
+        "name": "api",
+        "prompt": "Implement only the API, entry points and packaging assigned by the lead. Coordinate interfaces and avoid edits to core-owned files. Run a bounded component check, then finish_teammate with changed paths and known failures."
+      },
+      {
+        "name": "checker",
+        "prompt": "After both component handoffs, inspect their integration and run one public-API verification pass. Report findings and known failures through finish_teammate; do not start repeated repair loops.",
+        "tools": [
+          "read",
+          "bash"
+        ],
+        "start_after": [
+          "core",
+          "api"
+        ]
+      }
+    ],
+    "lead_prompt": "Define shared interfaces before delegation, give implementers separate file ownership, and collect the checker report before finishing. Record known failures honestly."
+  },
+  "startPro": [
+    {
+      "moduleName": "nl2repo-mock",
+      "proNameList": [
+        "mock-fixture"
+      ]
+    }
+  ]
+}

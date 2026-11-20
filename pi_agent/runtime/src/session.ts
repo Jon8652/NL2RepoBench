@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
   type AgentSession, type ExtensionFactory, type InlineExtension } from "@earendil-works/pi-coding-agent";
@@ -18,9 +19,21 @@ export interface ActorSession {
 export class Sessions {
   readonly actors = new Map<string, ActorSession>();
   onMessage?: (actor: string, message: unknown) => void;
-  constructor(readonly config: RuntimeConfig, readonly models: ModelRuntime, readonly trace: Trace, readonly budget: Budget) {}
+  readonly specification: { content: string; sha256: string; bytes: number };
+  private readonly specificationActors = new Set<string>();
+  constructor(readonly config: RuntimeConfig, readonly models: ModelRuntime, readonly trace: Trace, readonly budget: Budget) {
+    const content = readFileSync(join(config.workspace, "start.md"), "utf8");
+    this.specification = Object.freeze({ content, sha256: createHash("sha256").update(content).digest("hex"),
+      bytes: Buffer.byteLength(content) });
+  }
+
+  get specificationDelivery(): { sha256: string; bytes: number; delivery: string; actors: string[] } {
+    return { sha256: this.specification.sha256, bytes: this.specification.bytes,
+      delivery: "native_custom_message", actors: [...this.specificationActors] };
+  }
 
   async create(id: string, prompt: string, factories: ExtensionFactory[], tools?: string[], role = id): Promise<ActorSession> {
+    this.budget.check();
     const config = this.config;
     const batchFiles = config.batch_file_writes !== false;
     this.budget.register(id, role);
@@ -86,7 +99,8 @@ export class Sessions {
         this.onMessage?.(id, data.message);
         if (data.message.role === "assistant") {
           actor.lastStopReason = data.message.stopReason;
-          this.budget.add(id, data.message.usage ?? {});
+          const diagnostics = this.budget.recordResponse(id, data.message);
+          this.trace.emit(id, "response_diagnostic", { stop_reason: data.message.stopReason, ...diagnostics });
         }
       }
       if (event.type === "compaction_end" && data.result?.usage) this.budget.add(id, data.result.usage, true);
@@ -103,6 +117,15 @@ export class Sessions {
     this.trace.emit(id, "actor_created", { session_id: session.sessionId, session_file: session.sessionFile,
       extensions: loaded.extensions.map(ext => ext.path), flags: [...flags.keys()], tools: session.getActiveToolNames(),
       model: { provider: session.model?.provider, id: session.model?.id }, thinking: session.thinkingLevel });
+    // Deliver the immutable complete task once, including sections beyond native read limits.
+    // triggerTurn=false appends to the native session without spending a model response.
+    await session.sendCustomMessage({ customType: "nl2repo-task-specification", display: false,
+      content: "Complete public task specification from " + join(config.workspace, "start.md") +
+        ". Use the full specification and its public API examples for your assigned pass; file reads may be paginated.\n\n" + this.specification.content,
+      details: { sha256: this.specification.sha256, bytes: this.specification.bytes } }, { triggerTurn: false });
+    this.specificationActors.add(id);
+    this.trace.emit(id, "task_specification_delivered", { sha256: this.specification.sha256, bytes: this.specification.bytes,
+      delivery: "native_custom_message" });
     return actor;
   }
 

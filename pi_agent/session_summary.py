@@ -103,7 +103,7 @@ def summarize_run(directory, options):
         for member in members:
             if ("lead", member) not in edges or (member, "lead") not in edges:
                 team_errors.append(f"Missing bidirectional exchange for {member}")
-        if not any(sender in members and target in members and sender != target for sender, target in edges):
+        if options["teammates"] > 1 and not any(sender in members and target in members and sender != target for sender, target in edges):
             team_errors.append("No delivered peer message")
         if not tasks or any(task["status"] != "completed" for task in tasks.values()):
             team_errors.append("Task board is empty or unfinished")
@@ -111,7 +111,7 @@ def summarize_run(directory, options):
         team = dict(team, status="incomplete" if team_errors else "completed", errors=list(dict.fromkeys(team_errors)))
     elif errors:
         team = dict(team, errors=errors)
-    result = {key: summary[key] for key in ("runtime_generation_status", "extension_status", "usage", "actors", "budget_error", "mock_requests", "setup", "role_budget_errors") if key in summary}
+    result = {key: summary[key] for key in ("runtime_generation_status", "extension_status", "usage", "actors", "budget_error", "mock_requests", "setup", "role_budget_errors", "response_diagnostics", "task_specification") if key in summary}
     result.update(team=team, manifest_path=str(directory / "manifest.json"), session_logs_path=str(directory))
     if deferred:
         result["deferred_actors"] = deferred

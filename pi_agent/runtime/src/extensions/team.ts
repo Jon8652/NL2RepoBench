@@ -31,9 +31,7 @@ export class Coordinator {
   private reminders = 0;
   private readonly runs = new Set<Promise<void>>();
   private readonly reserved = new Set<string>();
-  private readonly deadline: number;
   constructor(readonly config: RuntimeConfig, readonly sessions: Sessions, readonly trace: Trace, readonly budget: Budget) {
-    this.deadline = Date.now() + config.task_timeout_seconds * 1000;
     sessions.onMessage = (actor, message) => {
       const data = message as { role?: string; customType?: string; details?: { message_id?: string } };
       if (data.role === "custom" && data.customType === "nl2repo-team-message" && data.details?.message_id) {
@@ -194,7 +192,6 @@ export class Coordinator {
     while (selected().some(member => !member.error && (member.running || member.initial || member.pending.length))) {
       this.budget.check();
       if (signal?.aborted) throw new Error("Wait aborted");
-      if (Date.now() >= this.deadline) throw new Error("Team wait reached task execution timeout");
       await delay(25, undefined, { signal });
     }
     this.budget.check();
@@ -289,11 +286,9 @@ export class Coordinator {
   }
 
   async drain(): Promise<void> {
-    const deadline = this.deadline;
     for (let round = 0; round < 4; round++) {
       while ([...this.members.values()].some(m => !m.error && (m.running || m.initial || m.pending.length))) {
         this.budget.check();
-        if (Date.now() >= deadline) throw new Error("Team did not drain before completion deadline");
         await delay(10);
       }
       const lead = this.sessions.actors.get("lead");
@@ -323,7 +318,7 @@ export class Coordinator {
     }
     const messages = [...this.messages.values()];
     const peers = messages.filter(m => m.delivered && m.sender !== "lead" && m.target !== "lead").length;
-    if (!peers) errors.push("No delivered peer message");
+    if (this.config.teammates > 1 && !peers) errors.push("No delivered peer message");
     if (messages.some(m => !m.delivered)) errors.push("Undelivered team messages remain");
     if (!this.tasks.size || [...this.tasks.values()].some(task => task.status !== "completed")) errors.push("Task board is empty or incomplete");
     return { status: errors.length ? "incomplete" : "completed", errors, members: this.list(), tasks: [...this.tasks.values()],

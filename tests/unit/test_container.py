@@ -38,6 +38,15 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(self.run_case(exit_code=143, timeout=True)["generation_status"], "timeout")
         self.assertIn("cleanup_error", self.run_case(cleanup=1))
 
+    def test_raw_exit_state_is_retained_without_changing_the_shared_oom_policy(self):
+        result = self.run_case(exit_code=0, oom=True)
+        self.assertEqual(result["generation_status"], "failed")
+        self.assertTrue(result["oom_killed"])
+        self.assertEqual(result["container_state"]["Status"], "exited")
+        self.assertEqual(result["container_state"]["ExitCode"], 0)
+        self.assertTrue(result["container_state"]["OOMKilled"])
+        self.assertEqual(result["container_state"]["Error"], "")
+
 
 if __name__ == "__main__":
     unittest.main()
