@@ -1,4 +1,24 @@
-# Pi mock validation record
+# Pi validation and development history
+
+## Current source: 20 November 2026
+
+The current source passed the following checks in Ubuntu WSL 2 with the pinned Linux amd64 images:
+
+| Check | Result |
+|---|---|
+| Python contracts | 45 passed |
+| Pi SDK mock tests | 62 passed |
+| TypeScript checking | passed |
+| Complete Docker mock/evaluator profiles | all 8 passed at 1/1 |
+| Configurations exercised by Docker mocks | total agents 1-6, external extension, uncapped three-agent team |
+| Real-model calls in these offline checks | 0 |
+| Live validation | 57 unique repository generations completed; 54 scored evaluations and 3 interrupted/unscored evaluations |
+
+The source-only publication check excludes local configs, repositories and logs; pinned installed Node dependencies were reused read-only. The complete Docker smoke suite uses a local scripted model with generation networking disabled. Recovered OOM evidence, unknown provider usage and workflow status remain separate from repository-test scores.
+
+See the [current study overview](benchmarks/2026-11-20/README.md), [21-run sweep](benchmarks/2026-11-20/multi-agent-test.md), and [five-attempt comparison](benchmarks/2026-11-20/multi-agent-test-five-repeats.md) for current results and limitations. Older results below retain their original test counts and configurations.
+
+## Historical record: 14 November 2026
 
 Validated on 14 November 2026 in Ubuntu WSL 2 as user `jon86`, with Docker Desktop's Linux engine. The implementation is in the WSL checkout on branch `feat/pi-agent-integration`.
 

@@ -494,3 +494,110 @@ test("missing worker reports are reminded then fail explicitly instead of hangin
     assert.equal(result.mock_requests.reviewer, undefined);
   } finally { cleanup(); }
 });
+
+
+test("lead plus one implementer completes bidirectional messaging and lead verification without peer messages", async () => {
+  const { config, cleanup } = fixture("team");
+  config.teammates = 1;
+  config.roles = config.roles.slice(0, 1);
+  try {
+    const result = await runBenchmark(config);
+    assert.equal(result.runtime_generation_status, "completed", JSON.stringify(result));
+    assert.equal(result.team.status, "completed", JSON.stringify(result));
+    assert.equal(result.actors.length, 2);
+    assert.equal(result.team.peer_messages, 0);
+    assert.equal(result.team.delivered_messages, result.team.queued_messages);
+    assert.equal(result.team.tasks.length, 1);
+    const lead = events(join(config.artifacts, "lead/events.jsonl"));
+    assert.equal(lead.filter(e => e.type === "tool_execution_start" && e.data.toolName === "wait_agent").length, 1);
+    assert.ok(lead.some(e => e.type === "tool_execution_start" && e.data.toolName === "bash"));
+    const team = events(join(config.artifacts, "team-events.jsonl"));
+    const edges = team.filter(e => e.type === "message_queued").map(e => [e.data.sender, e.data.target]);
+    assert.ok(edges.some(([a, b]) => a === "lead" && b === "implementer"));
+    assert.ok(edges.some(([a, b]) => a === "implementer" && b === "lead"));
+  } finally { cleanup(); }
+});
+
+test("a custom-named two-agent role and lead prompt use the real SDK and explicit extensions", async () => {
+  const { config, cleanup } = fixture("team");
+  config.teammates = 1;
+  config.roles = [{ name: "builder", prompt: "Implement the assigned fixture files and report to the lead.", tools: ["read", "write", "bash"] }];
+  config.lead_prompt = "Review the public API after the builder reports.";
+  config.extensions = [{ path: resolve("test/fixtures/probe.ts"), scope: "all" }];
+  try {
+    const result = await runBenchmark(config);
+    assert.equal(result.team.status, "completed", JSON.stringify(result));
+    assert.deepEqual(result.actors.map((a: any) => a.id).sort(), ["builder", "lead"]);
+    assert.ok(result.mock_observations.every((o: any) => o.active_tools.includes("contract_probe")));
+    assert.equal(JSON.parse(readFileSync(join(config.artifacts, "manifest.json"), "utf8")).lead_prompt, config.lead_prompt);
+  } finally { cleanup(); }
+});
+
+for (const teammates of [3, 5]) {
+  test("a lead plus " + teammates + " custom teammates supports parallel components and a dependency join", async () => {
+    const { config, cleanup } = fixture("team");
+    config.teammates = teammates;
+    const builders = Array.from({ length: teammates - 1 }, (_, index) => "component_" + index);
+    config.roles = [
+      ...builders.map(name => ({ name, prompt: "Implement only your assigned component files, then report.", tools: ["read", "write", "bash"] })),
+      { name: "auditor", prompt: "Review all completed components once and report findings.", tools: ["read", "bash"], start_after: builders },
+    ];
+    try {
+      const result = await runBenchmark(config);
+      assert.equal(result.runtime_generation_status, "completed", JSON.stringify(result));
+      assert.equal(result.team.status, "completed", JSON.stringify(result));
+      assert.equal(result.actors.length, teammates + 1);
+      assert.equal(new Set(result.actors.map((a: any) => a.session_id)).size, teammates + 1);
+      assert.equal(result.team.tasks.length, teammates);
+      assert.equal(result.team.delivered_messages, result.team.queued_messages);
+      const team = events(join(config.artifacts, "team-events.jsonl"));
+      const reviewStart = team.find(e => e.type === "member_started" && e.actor_id === "auditor");
+      for (const builder of builders) {
+        const settled = events(join(config.artifacts, "members", builder, "events.jsonl")).find(e => e.type === "agent_settled");
+        assert.ok(reviewStart.sequence > settled.sequence);
+        assert.ok(team.some(e => e.type === "message_queued" && e.data.sender === builder && e.data.target === "auditor"));
+      }
+      let active = 0, peak = 0;
+      for (const event of team) {
+        if (event.type === "member_started") peak = Math.max(peak, ++active);
+        if (event.type === "member_idle") active--;
+      }
+      assert.ok(peak <= config.max_active_teammates);
+      assert.equal(active, 0);
+      assert.ok(!result.mock_observations.some((o: any) => o.actor === "auditor" && o.active_tools.includes("write_files")));
+    } finally { cleanup(); }
+  });
+}
+
+test("custom flat teams must still deliver a teammate-to-teammate message", async () => {
+  for (const scenario of ["normal", "no-peer"] as const) {
+    const { config, cleanup } = fixture("team");
+    config.roles = ["builder", "documenter"].map(name => ({
+      name, prompt: "Complete your assigned component and report.", tools: ["read", "write", "bash"],
+    }));
+    try {
+      const result = await runBenchmark(config, scenario);
+      assert.equal(result.runtime_generation_status, "completed", JSON.stringify(result));
+      assert.equal(result.team.status, scenario === "normal" ? "completed" : "incomplete", JSON.stringify(result));
+      if (scenario === "no-peer") assert.ok(result.team.errors.includes("No delivered peer message"));
+    } finally { cleanup(); }
+  }
+});
+
+test("two-agent worker failure remains incomplete and failed joined prerequisites do not start custom review", async () => {
+  for (const teammates of [1, 3]) {
+    const { config, cleanup } = fixture("team");
+    config.teammates = teammates;
+    config.roles = [{ name: "builder", prompt: "Build your assigned component.", tools: ["read", "write", "bash"] }];
+    if (teammates > 1) config.roles.push(
+      { name: "api", prompt: "Build the assigned API.", tools: ["read", "write", "bash"] },
+      { name: "auditor", prompt: "Review both components.", tools: ["read", "bash"], start_after: ["builder", "api"] },
+    );
+    try {
+      const result = await runBenchmark(config, "worker-error");
+      assert.equal(result.team.status, "incomplete");
+      assert.equal(result.mock_requests.auditor, undefined);
+      assert.ok(result.team.errors.length > 0);
+    } finally { cleanup(); }
+  }
+});

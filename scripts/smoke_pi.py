@@ -21,9 +21,16 @@ def main():
     if args.evaluate_fixture:
         fixture = ROOT / "tests/fixtures/mock-fixture"
         subprocess.run(["docker", "build", "--tag", "ghcr.io/multimodal-art-projection/nl2repobench/mock-fixture:1.0", str(fixture)], check=True)
-    for profile in ("single", "extensions", "team", "uncapped-team"):
-        team_profile = profile in ("team", "uncapped-team")
-        config = json.loads((ROOT / f"config.pi.mock.{'team' if team_profile else 'single'}.json").read_text())
+    for profile in ("single", "extensions", "team", "uncapped-team", "two-agent", "large-team", "five-agent", "six-agent"):
+        team_profile = profile in ("team", "uncapped-team", "two-agent", "large-team", "five-agent", "six-agent")
+        fixture_profile = "large-team" if profile in ("five-agent", "six-agent") else (profile if profile in ("two-agent", "large-team") else ("team" if team_profile else "single"))
+        config = json.loads((ROOT / f"config.pi.mock.{fixture_profile}.json").read_text())
+        if profile in ("five-agent", "six-agent"):
+            count = 4 if profile == "five-agent" else 5
+            components = config["pi"]["roles"][:-1]
+            components += [{"name": f"component_{n}", "prompt": "Implement the assigned independent component, run a bounded check, and finish_teammate with findings."} for n in range(count - 3)]
+            reviewer = dict(config["pi"]["roles"][-1], start_after=[role["name"] for role in components])
+            config["pi"].update(teammates=count, roles=[*components, reviewer])
         if profile == "uncapped-team":
             config["pi"].update(max_total_tokens=None, role_token_limits={}, enforce_role_token_limits=False)
         assert config["pi"]["mock"] is True
@@ -46,12 +53,18 @@ def main():
         assert result["generation_status"] == "completed", result
         assert result["runtime_generation_status"] == "completed", result
         assert result["team"]["status"] == ("completed" if team_profile else "not_applicable"), result
+        actor_count = len(result["usage"]["actors"])
+        assert actor_count == (config["pi"]["teammates"] + 1 if team_profile else 1), result
+        if profile == "two-agent":
+            assert result["team"]["peer_messages"] == 0, result
+        if profile in ("large-team", "five-agent", "six-agent"):
+            assert result["team"]["peer_messages"] >= 2, result
         if profile == "extensions":
             probe = json.loads((Path(result["workspace_path"]) / "probe.json").read_text())
             assert probe == {"value": "mock-value", "label": "docker-fixture", "mode": True}, probe
         if args.evaluate_fixture:
             assert result["evaluation_status"] == "completed" and result["score"] == 1, result
-        print(json.dumps({"profile": profile, "result": str(path), "team": result["team"]["status"],
+        print(json.dumps({"profile": profile, "result": str(path), "team": result["team"]["status"], "actors": actor_count,
                           "evaluation": result["evaluation_status"], "score": result["score"],
                           "mock_tokens": result["usage"]["total_tokens"]}), flush=True)
 

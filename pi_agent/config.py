@@ -15,11 +15,31 @@ PROTOCOLS = {"openai-completions", "openai-responses", "anthropic-messages"}
 PACKAGE_DIR = Path(__file__).resolve().parent
 
 
+
+def resolve_prompt(source, base, label, text_key="prompt", file_key="prompt_file", optional=False):
+    keys = [key for key in (text_key, file_key) if key in source]
+    if not keys and optional:
+        return None
+    if len(keys) != 1:
+        raise ValueError(f"{label} requires exactly one of {text_key} or {file_key}")
+    value = source[keys[0]]
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} prompt must be nonempty text")
+    if keys[0] == file_key:
+        path = (base / value).resolve()
+        if not path.is_file():
+            raise ValueError(f"Missing {label} prompt: {path}")
+        value = path.read_text(encoding="utf-8")
+        if not value.strip():
+            raise ValueError(f"{label} prompt file must contain nonempty text")
+    return value
+
+
 def resolve_options(config):
     supplied = config.get("pi", {})
     if not isinstance(supplied, dict):
         raise ValueError("pi must be an object")
-    allowed = {"profile", "mock", "image", "teammates", "max_active_teammates", "roles", "extensions",
+    allowed = {"profile", "mock", "image", "teammates", "lead_prompt", "lead_prompt_file", "max_active_teammates", "roles", "extensions",
                "extension_options", "task_timeout_seconds", "max_total_tokens", "max_turns", "max_messages",
                "workflow_validation", "memory", "cpus", "pids_limit", "startup_commands", "batch_file_writes", "compact_write_history", "python_packages", "setup_timeout_seconds", "role_token_limits", "enforce_role_token_limits"}
     if supplied.keys() - allowed:
@@ -43,7 +63,9 @@ def resolve_options(config):
                   compact_write_history=compact, python_packages=packages)
     if not isinstance(result["image"], str) or not result["image"].strip():
         raise ValueError("pi.image must be a nonempty image tag")
-    for key, default in {"teammates": 2, "max_active_teammates": 2, "task_timeout_seconds": 900,
+    supplied_roles = supplied.get("roles")
+    default_teammates = len(supplied_roles) if profile == "team" and isinstance(supplied_roles, list) and supplied_roles else 2
+    for key, default in {"teammates": default_teammates, "max_active_teammates": 2, "task_timeout_seconds": 900,
                          "max_turns": 60, "max_messages": 100,
                          "pids_limit": 512, "setup_timeout_seconds": 120}.items():
         result[key] = positive_int(supplied.get(key, default), f"pi.{key}")
@@ -61,36 +83,36 @@ def resolve_options(config):
     if validation not in ("off", "report", "required"):
         raise ValueError("pi.workflow_validation must be off, report, or required")
     result["workflow_validation"] = validation
-    if profile == "team" and result["teammates"] < 2:
-        raise ValueError("The team profile requires at least two teammates for peer messaging")
     base = Path(config.get("_config_dir", ".")).resolve()
-    roles = supplied.get("roles", [
+    lead_prompt = resolve_prompt(supplied, base, "Lead", "lead_prompt", "lead_prompt_file", optional=True)
+    if lead_prompt is not None:
+        result["lead_prompt"] = lead_prompt
+    default_roles = [
         {"name": "implementer", "prompt_file": str(PACKAGE_DIR / "roles/implementer.md")},
         {"name": "reviewer", "prompt_file": str(PACKAGE_DIR / "roles/reviewer.md"), "start_after": ["implementer"]},
-    ])
+    ]
+    if profile == "team" and result["teammates"] == 1:
+        default_roles = [{"name": "implementer", "prompt_file": str(PACKAGE_DIR / "roles/solo-implementer.md")}]
+    roles = supplied.get("roles", default_roles)
     if not isinstance(roles, list) or not roles:
         raise ValueError("pi.roles must be a nonempty array")
     result["roles"] = []
     names = set()
     for role in roles:
-        if not isinstance(role, dict) or role.keys() - {"name", "prompt_file", "tools", "start_after"}:
-            raise ValueError("Each role accepts name, prompt_file, tools, and start_after")
+        if not isinstance(role, dict) or role.keys() - {"name", "prompt", "prompt_file", "tools", "start_after"}:
+            raise ValueError("Each role accepts name, prompt or prompt_file, tools, and start_after")
         name = role.get("name")
         if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name) or name in names:
             raise ValueError("Role names must be unique lowercase identifiers")
         names.add(name)
-        if not isinstance(role.get("prompt_file"), str) or not role["prompt_file"].strip():
-            raise ValueError("Each role requires a prompt_file")
-        path = (base / role["prompt_file"]).resolve()
-        if not path.is_file():
-            raise ValueError(f"Missing role prompt: {path}")
+        prompt = resolve_prompt(role, base, f"Role {name}")
         tools = role.get("tools", ["read", "bash", "edit", "write"])
         if not isinstance(tools, list) or not tools or not all(isinstance(x, str) for x in tools):
             raise ValueError("Role tools must be a nonempty list of tool names")
         dependencies = role.get("start_after", [])
         if not isinstance(dependencies, list) or not all(isinstance(x, str) for x in dependencies) or len(set(dependencies)) != len(dependencies):
             raise ValueError("Role start_after must be a list of unique role names")
-        result["roles"].append(dict(name=name, prompt=path.read_text(encoding="utf-8"), tools=tools, start_after=dependencies))
+        result["roles"].append(dict(name=name, prompt=prompt, tools=tools, start_after=dependencies))
     graph = {role["name"]: role["start_after"] for role in result["roles"]}
     def visit(name, active):
         if name not in graph:

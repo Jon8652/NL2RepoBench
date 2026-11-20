@@ -15,7 +15,7 @@ Select a backend with `backend` in the JSON configuration or the `--backend` CLI
 
 ## Requirements
 
-- Linux, or Ubuntu under WSL 2. The validated Windows setup uses Docker Desktop with its Linux engine and Ubuntu integration enabled.
+- Linux amd64, or Ubuntu under WSL 2. The validated Windows setup uses Docker Desktop with its Linux engine and Ubuntu integration enabled. Other CPU architectures are not validated; the generation image currently includes an x86-64 fd binary.
 - Python 3.12 and Docker accessible from the same Linux/WSL user without `sudo`.
 - For WSL, keep the checkout in the Linux filesystem, such as `~/projects/NL2RepoBench`.
 - Network access for initial image/dependency downloads. Live Pi runs also need a model endpoint that supports the selected protocol and tool calls.
@@ -40,7 +40,7 @@ python scripts/test_pi.py
 python scripts/smoke_pi.py --evaluate-fixture
 ```
 
-The test script runs Python contracts, TypeScript checking, and real Pi SDK sessions against a local scripted model. The smoke script exercises single-agent, external-extension, team, and uncapped-team profiles through Docker and the existing evaluator, using a tiny fixture. Mock generation containers use `--network none`; these checks make no real-model requests.
+The test script runs Python contracts, TypeScript checking, and real Pi SDK sessions against a local scripted model. The smoke script checks eight Docker/evaluator profiles: total agent counts 1-6, an external extension with flags and a startup command, and an uncapped default three-agent team. Mock generation containers use `--network none`; these checks make no real-model requests. Initial image/dependency downloads can still need network access.
 
 To run just the team generation fixture:
 
@@ -75,7 +75,7 @@ The checked-in example is a limited pilot: generation only, a 50,000-token share
     "mock": false,
     "teammates": 2,
     "max_active_teammates": 2,
-    "task_timeout_seconds": 3600,
+    "task_timeout_seconds": 10800,
     "max_total_tokens": null,
     "max_turns": 200,
     "workflow_validation": "required",
@@ -87,8 +87,8 @@ The checked-in example is a limited pilot: generation only, a 50,000-token share
       "protocol": "openai-completions",
       "baseUrl": "",
       "apiKeyEnv": "NL2REPO_API_KEY",
-      "contextWindow": 131072,
-      "maxTokens": 4096,
+      "contextWindow": 262144,
+      "maxTokens": 8192,
       "reasoning": false,
       "proNameList": ["jsonlines"]
     }
@@ -115,7 +115,7 @@ Supported Pi transports are `openai-completions` (OpenAI-compatible Chat Complet
 | `startPro[].proNameList` | Selected task directories under `test_files`; `jsonlines` selects one repository |
 | `max_pool_size` | Concurrent benchmark jobs, independent of teammate count |
 | `pi.profile` | `team` for the lead and teammates, or `single` for the lead alone |
-| `pi.teammates` | Teammates excluding the lead; team mode requires at least two |
+| `pi.teammates` | Teammates excluding the lead; minimum one. Defaults to the explicit role count, or two without custom roles |
 | `pi.max_active_teammates` | Maximum concurrently active teammates |
 | `pi.max_total_tokens` | Shared cumulative usage across all actors and responses; `null` disables token stopping |
 | `pi.max_turns` / `pi.task_timeout_seconds` | Shared response limit and task deadline |
@@ -128,7 +128,11 @@ Token ceilings are checked at response boundaries; in-flight responses can overs
 
 The default team consists of a **lead, implementer, and reviewer** using the selected model. They share the generated repository while retaining separate persistent conversations and session files. The implementer hands off its work before the reviewer begins; the lead collects both reports. The bundled extension provides delegation, peer messaging, a task board, blocking waits, and explicit teammate completion. Required workflow validation checks the recorded reports, tasks, sessions, and message delivery separately from code quality.
 
-Use `pi.profile: "single"` for a single-agent baseline. Custom roles and larger teams can be configured; the validated team size is two teammates plus the lead.
+Use `pi.profile: "single"` for a single-agent baseline. Set `pi.teammates: 1` for two total agents: the implementer produces the repository and the lead handles review after its report. The default three-agent roles, prompts, dependency handoff and completion logic are preserved.
+
+For larger teams, provide named `roles` with either an inline `prompt` or a `prompt_file` and optional `tools` / `start_after` dependencies. If `teammates` is omitted, it is inferred from the role count. `lead_prompt` or `lead_prompt_file` customizes lead responsibilities in either profile. Use one role per teammate for a straightforward fixed team; role names are arbitrary, and dependent roles can wait for multiple prerequisites.
+
+Mock examples are available for [two agents](config.pi.mock.two-agent.json) and [four agents](config.pi.mock.large-team.json). The smoke suite covers total agent counts 1-6; the [current live validation](docs/benchmarks/2026-11-20/README.md) also exercised all six sizes. See [team sizes and custom prompts](docs/pi-integration.md#team-sizes-and-custom-prompts) for configuration details.
 
 Custom extensions can register tools, event hooks, flags, and noninteractive commands through Pi's public ExtensionAPI. For example, add these fields to the `pi` object, replacing the extension path and options with your own:
 
@@ -181,21 +185,40 @@ For the standard adapter, changing registries requires updating `APP_IMAGE` and 
 
 ## Verified integration results
 
-Validation includes **28 Python contracts and 33 Pi SDK mock tests**, TypeScript checking, and all four complete Docker mock evaluator profiles passing at 1/1.
+As of **20 November 2026**, the current source passed **45 Python contract tests, 62 Pi SDK mock tests, and TypeScript checking**. A source-only publication check excluded local credentials and run artifacts while reusing the pinned installed Node dependencies read-only.
 
-A full `jsonlines` repository task also completed with `Qwen/Qwen3.5-397B-A17B-FP8`, using a 262,144-token context setting and an 8,192-token response limit. The Pi run used a lead and two teammates, completed its independent workflow verification, and ran the official repository tests. A subsequent single-agent OpenHands comparison used the same model endpoint, specification, evaluator base, and network policy, with no total-token ceiling in either run.
+All eight offline Docker smoke/evaluator profiles also passed at **1/1** using synthetic responses; no live model calls were made during publication preparation.
 
-| Measurement | Pi team | OpenHands single agent |
-|---|---:|---:|
-| Generation and evaluation | completed | completed |
-| Official tests passed | 17/27 (62.96%) | 17/27 (62.96%) |
-| Failed / collection errors | 10 / 0 | 10 / 0 |
-| Reported total tokens | 2,187,575 | 5,386,665 |
-| Generation time | 18.34 minutes | 16.23 minutes |
+The current live validation used `Qwen/Qwen3.5-397B-A17B-FP8` on `jsonlines`, `schedule-master` and `tinydb`:
 
-These are one-task validation results, not full-benchmark scores. Prompts, tools, generation images, and agent counts differ. Generation times exclude image downloads and evaluation; reported token usage is not a billing estimate.
+- The [21-run sweep](docs/benchmarks/2026-11-20/multi-agent-test.md) covers Pi with 1-6 total agents and single-agent OpenHands once per repository.
+- The [five-attempt study](docs/benchmarks/2026-11-20/multi-agent-test-five-repeats.md) contains 45 records for Pi single agent, Pi three agents and OpenHands. Nine are selected baselines from the sweep; 36 are new generations.
+- Across both reports, **57 unique live generations completed their native agent lifecycle**, and Pi team workflows passed independent validation. **54 evaluations produced scores; three were interrupted/unscored** after confirmed infinite loops in generated code.
+
+These are available-evaluation mean pass rates. Parentheses show scored attempts out of five; the detailed report also shows a separate conservative mean assigning zero to unscored attempts without changing the original records.
+
+| Repository | Pi single agent | Pi three agents | OpenHands single agent |
+|---|---:|---:|---:|
+| jsonlines | 68.15% (5/5) | 74.07% (3/5) | 65.74% (4/5) |
+| schedule-master | 32.84% (5/5) | 29.38% (5/5) | 29.88% (5/5) |
+| tinydb | 72.65% (5/5) | 67.45% (5/5) | 69.90% (5/5) |
+
+There was no consistent quality advantage from adding agents under this model, role design and budgets. Single-agent Pi had the highest mean on two tasks; Pi three-agent's higher available mean on `jsonlines` uses only three scored attempts. The exploratory 1-6-agent sweep has one attempt per cell. These small samples do not establish equivalence or general performance on the full benchmark.
+
+Reported tokens include repeated input context and all actors. One recovered streamed-response disconnect leaves Pi three-agent `schedule-master` usage and its token mean as lower bounds. Four single-agent `jsonlines` runs retained verified recovered-subprocess-OOM warnings; their repositories were graded normally. Unknown usage and prices are not invented.
+
+See the [study overview, controls and portable data](docs/benchmarks/2026-11-20/README.md) for all individual results, average token usage, variability, image/source hashes and retained issues. Configured limits were a 262,144-token context, 8,192-token output maximum, no cumulative token ceiling, three hours per generation, and 200 shared Pi responses or OpenHands controller iterations. Those response/iteration units differ.
+
+## Evaluator limitations
+
+The shared evaluator's scoring rules remain unchanged. It has no per-test timeout, so nonterminating generated code can hang grading. A manually stopped pytest run can leave a raw zero/completed record without a final summary; the published comparisons retain the known cases as interrupted/unscored. This annotation is not an automatic feature of the normal runner.
+
+Dependency-file removal before evaluation and legacy collection-error parsing also remain unchanged. Keep generation/workflow status separate from code quality, and address evaluator termination/summary handling before a large unattended sweep.
+
+## Further documentation
 
 - [Pi setup, configuration, extensions, and artifacts](docs/pi-integration.md)
-- [Completed Pi repository validation](docs/pi-one-repository-validation.md)
-- [Pi versus OpenHands comparison and test differences](docs/openhands-pi-jsonlines-comparison.md)
-- [Mock validation and development history](docs/pi-validation.md)
+- [Current validation and five-attempt results](docs/benchmarks/2026-11-20/README.md)
+- [Historical mock validation and development record](docs/pi-validation.md)
+- [Historical first completed Pi repository](docs/pi-one-repository-validation.md)
+- [Historical first OpenHands/Pi comparison](docs/openhands-pi-jsonlines-comparison.md)

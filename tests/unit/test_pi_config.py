@@ -20,6 +20,58 @@ class PiConfigTests(unittest.TestCase):
         self.assertEqual([r["name"] for r in options["roles"]], ["implementer", "reviewer"])
         self.assertEqual(options["roles"][1]["start_after"], ["implementer"])
 
+    def test_two_total_agents_default_to_one_implementer(self):
+        options = resolve_options({"pi": {"teammates": 1}})
+        self.assertEqual(options["profile"], "team")
+        self.assertEqual([role["name"] for role in options["roles"]], ["implementer"])
+        self.assertEqual(options["roles"][0]["start_after"], [])
+        self.assertIn("lead", options["roles"][0]["prompt"].lower())
+        self.assertNotIn("reviewer owns", options["roles"][0]["prompt"])
+
+    def test_inline_roles_infer_team_size_and_allow_dependency_joins(self):
+        roles = [{"name": "core", "prompt": "Implement only the assigned core files."},
+                 {"name": "api", "prompt": "Implement only the assigned API files."},
+                 {"name": "checker", "prompt": "Review both components.", "start_after": ["core", "api"]}]
+        options = resolve_options({"pi": {"roles": roles, "lead_prompt": "Coordinate public interfaces."}})
+        self.assertEqual(options["teammates"], 3)
+        self.assertEqual(options["max_active_teammates"], 2)
+        self.assertEqual(options["roles"][2]["start_after"], ["core", "api"])
+        self.assertEqual(options["lead_prompt"], "Coordinate public interfaces.")
+        with self.assertRaisesRegex(ValueError, "role definition"):
+            resolve_options({"pi": {"teammates": 4, "roles": roles}})
+
+    def test_prompt_files_resolve_relative_to_config_and_are_staged_as_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "lead.md").write_text("Coordinate the assigned work.\n")
+            (root / "worker.md").write_text("Implement the assigned files.\n")
+            options = resolve_options({"_config_dir": tmp, "pi": {
+                "lead_prompt_file": "lead.md",
+                "roles": [{"name": "builder", "prompt_file": "worker.md"}]}})
+            self.assertEqual(options["teammates"], 1)
+            self.assertEqual(options["lead_prompt"], "Coordinate the assigned work.\n")
+            self.assertEqual(options["roles"][0]["prompt"], "Implement the assigned files.\n")
+            run_dir = root / "run"
+            run_dir.mkdir()
+            runtime = json.loads(write_runtime_config(options, {"id": "mock"}, run_dir).read_text())
+            self.assertEqual(runtime["lead_prompt"], options["lead_prompt"])
+            self.assertNotIn("lead_prompt_file", runtime)
+
+    def test_invalid_or_ambiguous_prompt_sources_fail_preflight(self):
+        for role in ({"prompt": ""}, {"prompt": " "}, {"prompt": 1}, {},
+                     {"prompt": "inline", "prompt_file": "pi_agent/roles/implementer.md"}):
+            with self.subTest(role=role), self.assertRaises(ValueError):
+                resolve_options({"pi": {"teammates": 1, "roles": [dict(role, name="builder")]}})
+        for options in ({"lead_prompt": ""}, {"lead_prompt": False},
+                        {"lead_prompt_file": "missing.md"},
+                        {"lead_prompt": "inline", "lead_prompt_file": "pi_agent/roles/implementer.md"}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                resolve_options({"pi": options})
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "empty.md").write_text("  \n")
+            with self.assertRaises(ValueError):
+                resolve_options({"_config_dir": tmp, "pi": {"lead_prompt_file": "empty.md"}})
+
     def test_role_dependencies_are_configurable_and_acyclic(self):
         roles = [{"name": "builder", "prompt_file": "pi_agent/roles/implementer.md"},
                  {"name": "checker", "prompt_file": "pi_agent/roles/reviewer.md", "start_after": ["builder"]}]
@@ -74,7 +126,7 @@ class PiConfigTests(unittest.TestCase):
                 resolve_model({"moduleName": "model", "baseUrl": url}, False)
 
     def test_invalid_limits_and_unknown_options_fail_preflight(self):
-        for field, value in [("teammates", 1), ("max_active_teammates", True), ("max_turns", 0), ("typo", 2), ("mock", "true"), ("batch_file_writes", "true")]:
+        for field, value in [("teammates", 0), ("max_active_teammates", True), ("max_turns", 0), ("typo", 2), ("mock", "true"), ("batch_file_writes", "true")]:
             with self.subTest(field=field), self.assertRaises(ValueError):
                 resolve_options({"pi": {field: value}})
 
