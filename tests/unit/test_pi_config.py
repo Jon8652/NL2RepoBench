@@ -12,11 +12,12 @@ class PiConfigTests(unittest.TestCase):
     def test_default_is_two_teammates_and_one_job_is_configurable(self):
         options = resolve_options({})
         self.assertEqual(options["teammates"], 2)
-        self.assertTrue(options["batch_file_writes"])
+        self.assertFalse(options["batch_file_writes"])
         self.assertFalse(options["compact_write_history"])
         self.assertEqual(options["python_packages"], [])
         self.assertFalse(options["enforce_role_token_limits"])
-        self.assertFalse(resolve_options({"pi": {"batch_file_writes": False}})["batch_file_writes"])
+        for enabled in (False, True):
+            self.assertIs(resolve_options({"pi": {"batch_file_writes": enabled}})["batch_file_writes"], enabled)
         self.assertEqual([r["name"] for r in options["roles"]], ["implementer", "reviewer"])
         self.assertEqual(options["roles"][1]["start_after"], ["implementer"])
 

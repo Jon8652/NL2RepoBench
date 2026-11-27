@@ -68,8 +68,8 @@ Each `startPro` entry selects a model and task names. The `proNameList` values r
 | `task_timeout_seconds` | `900` | Task deadline; Docker also enforces an outer deadline. |
 | `max_total_tokens` | `50000` | Shared, provider-reported token budget across all actors; explicit null disables token stopping while retaining accounting. |
 | `max_turns` | `60` | Shared assistant-response budget across all actors. |
-| `batch_file_writes` | `true` | Replace active `write` with multi-file `write_files`; source history stays native unless explicitly compacted. |
-| `compact_write_history` | `false` | Opt-in experimental summarization of completed large writes in provider context. Native Pi history is the default. |
+| `batch_file_writes` | `false` | Use the native single-file `write` tool. Set to `true` to replace it with `write_files` for actors with write permission. |
+| `compact_write_history` | `false` | With batching enabled, summarize completed large writes in provider context. The default uses native Pi history. |
 | `python_packages` | `[]` | Exact package==version pins installed before model requests in an isolated job target directory. |
 | `setup_timeout_seconds` | `120` | Deadline for dependency preparation; failures stop before model calls. |
 | `role_token_limits` | `{}` | Optional per-role handoff targets whose sum fits within the shared cap; warnings start at 80%. |
@@ -94,9 +94,11 @@ The lead can call `start_team` with all assignments in one action. It creates ow
 
 Messages have separate queued and delivered events. A delivery receipt is recorded only when Pi emits the recipient's custom-message event, showing that the message entered that session's context. It does not prove comprehension. Idle teammates retain their conversation and can handle follow-ups. Waits, final reminders, message draining, and overall execution are bounded.
 
-The built-in file extension provides `write_files` with `files: [{path, content}, ...]`. It writes up to 64 UTF-8 files via Pi's write tool and returns path/byte/hash receipts without echoing source. All paths are checked before the first write; duplicate paths, workspace escapes and symlink traversal are rejected. Runtime I/O failure or cancellation can leave an explicitly reported partial batch. The `write` entry in role tool lists maps to `write_files`; roles without write permission do not gain it. Single-agent mode also supports this tool. Existing custom modes can still manage their own active tools.
+Pi uses its native `write` tool by default. Each call writes one file. To opt into batching in either single-agent or team mode, set `"batch_file_writes": true` inside the `pi` object. The runner then maps each role’s `write` permission to `write_files`. Read-only roles keep their existing permissions. Custom modes can still manage their own active tools.
 
-When `compact_write_history: true`, the `context` hook summarizes successful large historical `write`/`write_files` call/result pairs as ordinary text receipts in provider context. It removes both sides of each summarized pair, preserving the protocol and avoiding placeholder examples in tool arguments. Full calls and source remain on disk and in native session/normalized traces. Failed, unresolved, unrelated and small calls retain their original IDs/results. The batch writer rejects history omission markers submitted as new file content. This format was corrected after a live model copied the earlier argument markers into new files. Use `read` to retrieve current source when needed. This reduces request size, not accounting: provider-reported input/output token usage is still counted unchanged. `pi.batch_file_writes: false` restores the original write tool. `compact_write_history` defaults to false, so normal runs use Pi's native history and built-in compaction. The summary hook is explicitly experimental and independent of token accounting. Manifests record the effective setting, and `write_history_compacted` events record removed character counts. Mock payload observations verify actual request reduction; synthetic mock tokens do not estimate billing.
+The batch tool accepts `files: [{path, content}, ...]`, writes up to 64 UTF-8 files through Pi’s writer, and returns a receipt with the path, byte count, and hash of each file. It validates all paths before writing and rejects duplicate targets, workspace escapes, and symlink traversal. An I/O failure or cancellation can leave a partial batch, which the tool reports.
+
+With both `batch_file_writes` and `compact_write_history` set to `true`, an experimental context hook replaces completed large write calls and their tool results with short receipts in subsequent model requests. Full source remains on disk and in the native session logs. Failed, unresolved, unrelated, and small calls keep their original entries. Use `read` to retrieve the current source. The batch tool rejects receipt placeholders as new file content. The run manifest records the effective writer and history settings, and `write_history_compacted` events record the number of characters removed. Token usage always comes from the provider.
 
 ## Team sizes and custom prompts
 
@@ -215,6 +217,14 @@ python only_test.py --run-id <fixture-run-id> --task-root tests/fixtures
 ```
 
 Re-evaluation publishes a separate result referring to `source_run_id` and uses another fresh workspace copy.
+
+## Dependency warning
+
+Pi prepends a short dependency warning to the existing initial task-specification message for every actor, including single-agent mode, the lead and deferred teammates:
+
+> Your final repository must run in this task's reference grading environment. Use only runtime dependencies available there. Packages installed during development or declared in your generated dependency files are not automatically installed during grading. Still create the packaging files required by the specification.
+
+The public task file and its recorded hash remain unchanged. The warning adds no model turn and does not change role instructions or team scheduling. OpenHands and all evaluator code, images, tests and scoring remain unchanged. The warning clarifies the environment constraint; it cannot supply missing grader dependencies or ensure that model output follows the instruction.
 
 ## Validation scope
 

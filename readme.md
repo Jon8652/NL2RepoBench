@@ -50,6 +50,14 @@ python main.py --config config.pi.mock.team.json --task-root tests/fixtures
 
 Rebuild the Pi image after changing runtime source or dependencies. The runner checks its version and source fingerprint before generation.
 
+## Pi dependency warning
+
+Pi receives a short dependency warning with the initial task specification, once for the lead and each teammate:
+
+> Your final repository must run in this task's reference grading environment. Use only runtime dependencies available there. Packages installed during development or declared in your generated dependency files are not automatically installed during grading. Still create the packaging files required by the specification.
+
+This changes only Pi's task context. OpenHands, the evaluator, grading images, roles and team scheduling are unchanged. The warning does not install packages or provide a new package whitelist.
+
 ## Run one repository with Pi
 
 Start with a local configuration and supply credentials through the environment:
@@ -122,7 +130,7 @@ Supported Pi transports are `openai-completions` (OpenAI-compatible Chat Complet
 | `pi.workflow_validation` | `off`, `report`, or `required`; required validation rejects incomplete teamwork |
 | `startPro[].contextWindow` / `maxTokens` | Per-request model context and output settings, separate from cumulative usage |
 
-Token ceilings are checked at response boundaries; in-flight responses can overshoot. Native Pi history is the default, and batched file writes are enabled. Role token allocations are optional and advisory unless strict enforcement is explicitly enabled. See the guide for role definitions, dependencies, resource limits, and budget settings.
+Token ceilings are checked at response boundaries; in-flight responses can overshoot. Pi uses its native single-file `write` tool and native history by default. To enable multi-file writes, set `"batch_file_writes": true` in the `pi` object. Role token allocations are optional and advisory unless strict enforcement is explicitly enabled. See the guide for role definitions, dependencies, resource limits, and budget settings.
 
 ## Teams and ExtensionAPI
 
@@ -185,7 +193,7 @@ For the standard adapter, changing registries requires updating `APP_IMAGE` and 
 
 ## Verified integration results
 
-As of **20 November 2026**, the current source passed **45 Python contract tests, 62 Pi SDK mock tests, and TypeScript checking**. A source-only publication check excluded local credentials and run artifacts while reusing the pinned installed Node dependencies read-only.
+On **20 November 2026**, the integration passed **45 Python contract tests, 62 Pi SDK mock tests, and TypeScript checking**. A source-only publication check excluded local credentials and run artifacts while reusing the pinned installed Node dependencies read-only.
 
 All eight offline Docker smoke/evaluator profiles also passed at **1/1** using synthetic responses; no live model calls were made during publication preparation.
 

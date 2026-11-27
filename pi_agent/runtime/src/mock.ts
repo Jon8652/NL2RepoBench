@@ -3,9 +3,10 @@ import { createServer, type Server } from "node:http";
 import { once } from "node:events";
 import type { RuntimeConfig } from "./types.js";
 import { isDefaultTeam } from "./prompts.js";
+import { DEPENDENCY_WARNING } from "./session.js";
 
 type Action = { tool: string; args: Record<string, unknown> } | { text: string; reason?: string };
-export type MockScenario = "normal" | "error" | "length" | "worker-error" | "early-lead" | "rate-limit-once" | "hang" | "slow-handoff" | "write-history" | "missing-report" | "known-failures" | "no-peer" | "stream-drop-once" | "stream-drop" | "partial-write-stream" | "hang-worker";
+export type MockScenario = "normal" | "error" | "length" | "worker-error" | "early-lead" | "rate-limit-once" | "hang" | "slow-handoff" | "write-history" | "missing-report" | "known-failures" | "no-peer" | "stream-drop-once" | "stream-drop" | "partial-write-stream" | "team-write-stream-drop" | "hang-worker";
 
 const call = (tool: string, args: Record<string, unknown>): Action => ({ tool, args });
 
@@ -77,9 +78,9 @@ function action(actor: string, step: number, team: boolean, probe: boolean, batc
   return steps[step] ?? { text: "Review report complete." };
 }
 
-export async function startMockServer(scenario: MockScenario = "normal", config?: RuntimeConfig): Promise<{ baseUrl: string; server: Server; requests: Record<string, number>; observations: { actor: string; step: number; message_characters: number; has_large_file_marker: boolean; has_tool_argument_omission_marker: boolean; active_tools: string[]; has_specification_start: boolean; has_specification_end: boolean }[]; close: () => Promise<void> }> {
+export async function startMockServer(scenario: MockScenario = "normal", config?: RuntimeConfig): Promise<{ baseUrl: string; server: Server; requests: Record<string, number>; observations: { actor: string; step: number; message_characters: number; has_large_file_marker: boolean; has_tool_argument_omission_marker: boolean; active_tools: string[]; has_specification_start: boolean; has_specification_end: boolean; dependency_warning_occurrences: number }[]; close: () => Promise<void> }> {
   const requests: Record<string, number> = {};
-  const observations: { actor: string; step: number; message_characters: number; has_large_file_marker: boolean; has_tool_argument_omission_marker: boolean; active_tools: string[]; has_specification_start: boolean; has_specification_end: boolean }[] = [];
+  const observations: { actor: string; step: number; message_characters: number; has_large_file_marker: boolean; has_tool_argument_omission_marker: boolean; active_tools: string[]; has_specification_start: boolean; has_specification_end: boolean; dependency_warning_occurrences: number }[] = [];
   let rateLimited = false;
   const server = createServer(async (req, res) => {
     if (req.method !== "POST" || req.url !== "/v1/chat/completions") {
@@ -101,7 +102,8 @@ export async function startMockServer(scenario: MockScenario = "normal", config?
       const messages = JSON.stringify(body.messages);
       observations.push({ actor, step, message_characters: messages.length,
         has_large_file_marker: messages.includes("MOCK_LARGE_FILE_MARKER"), has_tool_argument_omission_marker: messages.includes("[Written file body omitted from request history;"), active_tools: [...tools],
-        has_specification_start: messages.includes("SPECIFICATION_START"), has_specification_end: messages.includes("SPECIFICATION_END") });
+        has_specification_start: messages.includes("SPECIFICATION_START"), has_specification_end: messages.includes("SPECIFICATION_END"),
+        dependency_warning_occurrences: messages.split(DEPENDENCY_WARNING).length - 1 });
       requests[actor] = step + 1;
       if (scenario === "hang" || (scenario === "hang-worker" && actor !== "lead" && step === 1)) return;
       if (scenario === "error" || (scenario === "worker-error" && actor !== "lead")) {
@@ -134,10 +136,17 @@ export async function startMockServer(scenario: MockScenario = "normal", config?
         choices: [{ index: 0, delta, finish_reason: reason }], ...(usage ? { usage } : {}),
       }) + "\n\n");
       chunk({ role: "assistant", content: "" });
-      if (scenario === "stream-drop" || (step === 0 && (scenario === "stream-drop-once" || scenario === "partial-write-stream"))) {
-        if (scenario === "partial-write-stream") {
-          chunk({ tool_calls: [{ index: 0, id: "interrupted-write", type: "function",
-            function: { name: "write_files", arguments: '{"files":[{"path":"corrupt.py","content":"unfinished' } }] });
+      // The implementer fails while writing. The lead then encounters the same error
+      // after wait_agent returns with the incomplete team.
+      const teamWriteDrop = scenario === "team-write-stream-drop" &&
+        ((actor === "implementer" && step >= 1) || (actor === "lead" && step >= 2));
+      if (teamWriteDrop || scenario === "stream-drop" ||
+          (step === 0 && (scenario === "stream-drop-once" || scenario === "partial-write-stream"))) {
+        if (teamWriteDrop || scenario === "partial-write-stream") {
+          const partialWrite = tools.has("write_files")
+            ? { name: "write_files", arguments: '{"files":[{"path":"corrupt.py","content":"unfinished' }
+            : { name: "write", arguments: '{"path":"corrupt.py","content":"unfinished' };
+          chunk({ tool_calls: [{ index: 0, id: "interrupted-write", type: "function", function: partialWrite }] });
         } else chunk({ content: "Mock interrupted response" });
         // Deliver headers and a real partial SSE response before terminating the socket.
         res.flushHeaders();

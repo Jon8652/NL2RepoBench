@@ -61,13 +61,17 @@ export async function runBenchmark(config: RuntimeConfig, scenario: MockScenario
       await lead.session.prompt(command);
     }
     const task = sessions.specification.content;
+    const batchFileWrites = config.batch_file_writes === true;
     manifest = { schema_version: 1, run_id: config.run_id, pi_version: "1.5.2", node_version: process.version,
       package_lock_sha256: sha(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8")),
       runtime_source_sha256: process.env.NL2REPO_RUNTIME_SHA256 ?? null,
       benchmark: config.benchmark ?? null, setup,
       role_token_limits: config.role_token_limits ?? {}, enforce_role_token_limits: config.enforce_role_token_limits === true,
       mock: config.mock, profile: config.profile, model: config.model,
-      batch_file_writes: config.batch_file_writes !== false, write_history: config.compact_write_history === true ? "successful large write call/result pairs summarized as receipt text in provider context only" : "native Pi history", task_sha256: sha(task),
+      batch_file_writes: batchFileWrites,
+      write_history: batchFileWrites && config.compact_write_history === true
+        ? "successful large write call/result pairs summarized as receipt text in provider context only" : "native Pi history",
+      task_sha256: sha(task),
       roles: config.roles.map(role => ({ ...role, prompt_sha256: sha(role.prompt) })),
       lead_prompt: config.lead_prompt ?? null,
       extensions: config.extensions, extension_options: config.extension_options, startup_commands: config.startup_commands,
