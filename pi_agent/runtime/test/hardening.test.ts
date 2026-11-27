@@ -147,6 +147,35 @@ test("persistent stream failure stops at the SDK retry bound and never claims su
   } finally { cleanup(); }
 });
 
+test("exhausted batch write streams settle without lead or teammate reminders", async () => {
+  const { config, cleanup } = fixture(2);
+  config.batch_file_writes = true;
+  try {
+    const result = await runBenchmark(config, "team-write-stream-drop");
+    // Lead: delegation and wait, then the failed response and one retry.
+    // Implementer: read, then the failed response and one retry.
+    assert.deepEqual(result.mock_requests, { lead: 4, implementer: 3 });
+    assert.equal(result.runtime_generation_status, "failed");
+    assert.match(result.error, /Lead did not complete: error/);
+    assert.equal(result.team.status, "incomplete");
+    assert.match(result.team.members.find((member: any) => member.id === "implementer").error,
+      /Teammate response ended with error/);
+    assert.match(result.team.members.find((member: any) => member.id === "reviewer").error, /Prerequisite/);
+    for (const actor of result.actors.filter((actor: any) => actor.id !== "reviewer")) {
+      assert.equal(actor.settled, true);
+      assert.equal(actor.last_stop_reason, "error");
+      const diagnostics = result.response_diagnostics.actors[actor.id];
+      assert.equal(diagnostics.error_responses, 2);
+      assert.equal(diagnostics.recovered_error_responses, 0);
+      assert.equal(diagnostics.unknown_usage_responses, 2);
+      assert.doesNotMatch(readFileSync(actor.session_file, "utf8"),
+        /"customType":"(?:team-reminder|report-reminder)"/);
+    }
+    assert.equal(result.response_diagnostics.usage_is_lower_bound, true);
+    assert.ok(!existsSync(join(config.workspace, "corrupt.py")));
+  } finally { cleanup(); }
+});
+
 test("a stream interrupted inside tool arguments cannot execute a partial file write", async () => {
   const { config, cleanup } = fixture();
   try {
@@ -234,3 +263,31 @@ test("zero-only provider usage remains unknown even on a normal stop", () => {
     assert.equal(budget.responseDiagnostics.actors.lead.unknown_usage_responses, 1);
   } finally { cleanup(); }
 });
+
+for (const total of [1, 3]) {
+  test("the short dependency warning reaches all " + total + " actors once before their first model request", async () => {
+    const { config, cleanup } = fixture(total - 1);
+    const originalSpec = readFileSync(join(config.workspace, "start.md"), "utf8");
+    const warning = "Your final repository must run in this task's reference grading environment. " +
+      "Use only runtime dependencies available there. Packages installed during development " +
+      "or declared in your generated dependency files are not automatically installed during " +
+      "grading. Still create the packaging files required by the specification.";
+    try {
+      const result = await runBenchmark(config);
+      assert.equal(result.runtime_generation_status, "completed", JSON.stringify(result));
+      assert.equal(result.team.status, total === 1 ? "not_applicable" : "completed");
+      const firstRequests = result.mock_observations.filter((o: any) => o.step === 0);
+      assert.equal(firstRequests.length, total);
+      assert.ok(firstRequests.every((o: any) => o.dependency_warning_occurrences === 1));
+      assert.equal(readFileSync(join(config.workspace, "start.md"), "utf8"), originalSpec);
+      for (const actor of result.actors) {
+        const entries = readFileSync(actor.session_file, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line));
+        const tasks = entries.filter(row => row.type === "custom_message" && row.customType === "nl2repo-task-specification");
+        assert.equal(tasks.length, 1, actor.id);
+        assert.ok(tasks[0].content.startsWith(warning + "\n\n"), actor.id);
+        assert.ok(tasks[0].content.includes(originalSpec), actor.id);
+        assert.equal(tasks[0].content.split(warning).length - 1, 1, actor.id);
+      }
+    } finally { cleanup(); }
+  });
+}

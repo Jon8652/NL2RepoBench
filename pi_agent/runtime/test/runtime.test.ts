@@ -35,6 +35,8 @@ test("single-agent uses the real SDK/tool loop against the local mock and persis
     assert.equal(result.team.status, "not_applicable");
     assert.match(readFileSync(join(config.workspace, "answer.py"), "utf8"), /return 42/);
     assert.equal(result.actors.length, 1);
+    assert.equal(JSON.parse(readFileSync(result.manifest_path, "utf8")).batch_file_writes, false);
+    assert.ok(result.mock_observations.every((o: any) => o.active_tools.includes("write") && !o.active_tools.includes("write_files")));
     assert.ok(readFileSync(result.actors[0].session_file, "utf8").includes("answer.py"));
     assert.equal(result.usage.total_tokens, result.usage.assistant_responses * 30);
   } finally { cleanup(); }
@@ -63,6 +65,7 @@ test("lead plus two persistent teammates exchange lead/peer messages and finish 
     assert.equal(result.actors.length, 3);
     assert.equal(new Set(result.actors.map((a: { session_id: string }) => a.session_id)).size, 3);
     assert.ok(result.team.peer_messages >= 1);
+    assert.ok(result.mock_observations.every((o: any) => o.active_tools.includes("write") && !o.active_tools.includes("write_files")));
     assert.equal(result.team.delivered_messages, result.team.queued_messages);
     assert.equal(result.team.tasks.length, 2);
     assert.equal(Object.keys(result.usage.actors).length, 3);
@@ -273,14 +276,18 @@ test("a failed prerequisite never starts the reviewer model", async () => {
 
 test("batch writes use the real SDK and completed source is absent from later provider payloads", async () => {
   const optimized = fixture();
+  optimized.config.batch_file_writes = true;
   optimized.config.compact_write_history = true;
   const baseline = fixture();
   baseline.config.batch_file_writes = false;
+  baseline.config.compact_write_history = true;
   try {
     const result = await runBenchmark(optimized.config, "write-history");
     const control = await runBenchmark(baseline.config, "write-history");
     assert.equal(result.runtime_generation_status, "completed", JSON.stringify(result));
     assert.equal(control.runtime_generation_status, "completed", JSON.stringify(control));
+    assert.equal(JSON.parse(readFileSync(result.manifest_path, "utf8")).batch_file_writes, true);
+    assert.equal(JSON.parse(readFileSync(control.manifest_path, "utf8")).write_history, "native Pi history");
     assert.match(readFileSync(join(optimized.config.workspace, "answer.py"), "utf8"), /return 42/);
     const payload = readFileSync(join(optimized.config.workspace, "docs/payload.txt"), "utf8");
     assert.ok(payload.length > 20000);
@@ -339,6 +346,7 @@ test("history summaries preserve failed/unresolved calls and originals without o
 
 test("roles without write capability do not gain the batch writer", async () => {
   const { config, cleanup } = fixture("team");
+  config.batch_file_writes = true;
   config.roles[0].tools = ["read", "bash"];
   try {
     await runBenchmark(config, "worker-error");
@@ -374,8 +382,9 @@ test("coordinated setup and finish deliver real handoffs without extra board/mes
   } finally { cleanup(); }
 });
 
-test("native Pi history is the default and the custom compactor is opt-in", async () => {
+test("opting into the batch writer keeps native Pi history by default", async () => {
   const { config, cleanup } = fixture();
+  config.batch_file_writes = true;
   try {
     const result = await runBenchmark(config, "write-history");
     assert.equal(result.runtime_generation_status, "completed");
@@ -490,6 +499,12 @@ test("missing worker reports are reminded then fail explicitly instead of hangin
     const result = await runBenchmark(config, "missing-report");
     assert.equal(result.team.status, "incomplete");
     assert.ok(result.team.members.some((m: any) => /required finish_teammate report/.test(m.error ?? "")));
+    for (const [id, reminder] of [["lead", "team-reminder"], ["implementer", "report-reminder"]]) {
+      const actor = result.actors.find((item: any) => item.id === id);
+      const reminders = events(actor.session_file).filter(entry =>
+        entry.type === "custom_message" && entry.customType === reminder);
+      assert.equal(reminders.length, 2, id);
+    }
     assert.ok(!result.budget_error);
     assert.equal(result.mock_requests.reviewer, undefined);
   } finally { cleanup(); }
@@ -564,7 +579,7 @@ for (const teammates of [3, 5]) {
       }
       assert.ok(peak <= config.max_active_teammates);
       assert.equal(active, 0);
-      assert.ok(!result.mock_observations.some((o: any) => o.actor === "auditor" && o.active_tools.includes("write_files")));
+      assert.ok(!result.mock_observations.some((o: any) => o.actor === "auditor" && (o.active_tools.includes("write") || o.active_tools.includes("write_files"))));
     } finally { cleanup(); }
   });
 }

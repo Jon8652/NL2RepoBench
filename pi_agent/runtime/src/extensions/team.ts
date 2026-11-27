@@ -263,7 +263,9 @@ export class Coordinator {
         pi.registerTool({ name: "wait_agent", label: "Wait for teammate", description: "Block until queued teammate work settles, bounded by the task deadline. Use target=all after delegation. No status polling or model requests occur during the wait. Legacy timeout_ms does not shorten the wait.",
           parameters: Type.Object({ target: Type.String({ description: "Teammate name, or all to wait for the whole team" }), timeout_ms: Type.Optional(Type.Integer({ minimum: 1 })) }),
           execute: async (_id, params, signal) => result(await this.wait(params.target, params.timeout_ms ?? 1000, signal)) });
-        pi.on("agent_before_settle", async event => {
+        pi.on("agent_before_settle", event => {
+          // Completion reminders should not restart a turn after the SDK's retries are exhausted.
+          if (event.outcome !== "completed") return;
           if (this.reminders >= 2 || this.budget.failure || this.members.size !== this.config.teammates) return;
           if ([...this.members.values()].some(m => !m.finished || m.running) || [...this.messages.values()].some(m => !m.delivered)) {
             this.reminders++;
@@ -273,6 +275,7 @@ export class Coordinator {
         });
       } else {
         pi.on("agent_before_settle", event => {
+          if (event.outcome !== "completed") return;
           const member = this.members.get(actor);
           if (!member || member.finished || member.error || this.budget.failure || member.reportReminders >= 2) return;
           member.reportReminders++;

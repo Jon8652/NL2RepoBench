@@ -10,6 +10,7 @@
     "task_timeout_seconds": 900,
     "max_total_tokens": 50000,
     "max_turns": 60,
+    "batch_file_writes": false,
     "workflow_validation": "report",
     "extensions": [],
     "extension_options": {},

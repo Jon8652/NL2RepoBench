@@ -50,7 +50,7 @@ def resolve_options(config):
     mock = supplied.get("mock", False)
     if type(mock) is not bool:
         raise ValueError("pi.mock must be a boolean")
-    batch_files = supplied.get("batch_file_writes", True)
+    batch_files = supplied.get("batch_file_writes", False)
     if type(batch_files) is not bool:
         raise ValueError("pi.batch_file_writes must be a boolean")
     compact = supplied.get("compact_write_history", False)

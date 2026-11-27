@@ -7,6 +7,12 @@ import { fileBatchExtension } from "./extensions/files.js";
 import { Budget, Trace } from "./events.js";
 import type { RuntimeConfig } from "./types.js";
 
+export const DEPENDENCY_WARNING =
+  "Your final repository must run in this task's reference grading environment. " +
+  "Use only runtime dependencies available there. Packages installed during development " +
+  "or declared in your generated dependency files are not automatically installed during " +
+  "grading. Still create the packaging files required by the specification.";
+
 export interface ActorSession {
   id: string;
   session: AgentSession;
@@ -35,7 +41,7 @@ export class Sessions {
   async create(id: string, prompt: string, factories: ExtensionFactory[], tools?: string[], role = id): Promise<ActorSession> {
     this.budget.check();
     const config = this.config;
-    const batchFiles = config.batch_file_writes !== false;
+    const batchFiles = config.batch_file_writes === true;
     this.budget.register(id, role);
     const budgetExtension: ExtensionFactory = pi => {
       pi.on("context", event => {
@@ -120,7 +126,7 @@ export class Sessions {
     // Deliver the immutable complete task once, including sections beyond native read limits.
     // triggerTurn=false appends to the native session without spending a model response.
     await session.sendCustomMessage({ customType: "nl2repo-task-specification", display: false,
-      content: "Complete public task specification from " + join(config.workspace, "start.md") +
+      content: DEPENDENCY_WARNING + "\n\nComplete public task specification from " + join(config.workspace, "start.md") +
         ". Use the full specification and its public API examples for your assigned pass; file reads may be paginated.\n\n" + this.specification.content,
       details: { sha256: this.specification.sha256, bytes: this.specification.bytes } }, { triggerTurn: false });
     this.specificationActors.add(id);
